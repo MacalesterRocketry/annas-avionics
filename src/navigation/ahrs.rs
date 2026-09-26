@@ -33,6 +33,7 @@ pub struct AhrsState {
     /// [`GYRO_LPF_HZ`]. Use this for control; the raw field is for logging.
     pub angular_velocity_filtered: AngularVec3,
     in_flight: bool,
+    // TODO: Add some sort of validity flag here to disable the control system if we don't have good gyro or AHRS hasn't settled?
 }
 
 impl Default for AhrsState {
@@ -51,7 +52,7 @@ impl Default for AhrsState {
 }
 
 impl AhrsState {
-    pub fn update(&mut self, gyro: AngularVec3, accel: Vec3, mag: Vec3, now: Instant) {
+    pub fn update(&mut self, gyro: AngularVec3, accel: Option<Vec3>, mag: Option<Vec3>, now: Instant) {
         let dt = now - self.last_update;
         self.last_update = now;
 
@@ -83,11 +84,10 @@ impl AhrsState {
 
         // EARTH FRAME CONVERSIONS
         // Convert body-frame measurements to earth frame for control systems
-        let _earth_accel = rotate_body_to_earth(q4, accel);
-        let _earth_gyro = AngularVec3::from(rotate_body_to_earth(q4, gyro.into()));
-        let _earth_mag = rotate_body_to_earth(q4, mag);
-
-        self.acceleration_earth = _earth_accel - Vec3 {x: 0.0, y: 0.0, z: G}; // Remove gravity from vertical acceleration when on the ground
+        if let Some(accel) = accel { // just skip applying acceleration if we don't have it
+            let earth_accel = rotate_body_to_earth(q4, accel);
+            self.acceleration_earth = earth_accel - Vec3 {x: 0.0, y: 0.0, z: G}; // Remove gravity from vertical acceleration
+        }
         let dt_seconds = duration_to_seconds(dt);
         self.velocity_earth += self.acceleration_earth * dt_seconds;
         self.position_earth += self.velocity_earth * dt_seconds;
@@ -245,26 +245,40 @@ pub fn compute_accelerometer_gradient(a_n: Vec3, q: Quat) -> Grad4 {
 
 // returns corrected sensor fused quaternion as quaternion q3 (unnormalized)
 fn madgwick_correction_step(q_pred: Quat, // predicted quaternion (gyro-propagated & normalized) -> q2
-                            acc: Vec3, // accelerometer (bias-corrected) in body frame (no normalizing required; we can normalize inside)
-                            mag: Vec3, // magnetometer (bias-corrected & soft-iron corrected) in body frame
+                            acc: Option<Vec3>, // accelerometer (bias-corrected) in body frame (no normalizing required; we can normalize inside)
+                            mag: Option<Vec3>, // magnetometer (bias-corrected & soft-iron corrected) in body frame
                             dt: Duration) -> Quat { // time step (s)
+    const NO_CORRECTION: Grad4 = Grad4 {w: 0.0, x: 0.0, y: 0.0, z: 0.0};
+
     let q = q_pred;
 
-    let nm = mag.norm();
-    let mut mag_grad = Grad4 {w: 0.0, x: 0.0, y: 0.0, z: 0.0};
-    // Skip magnetometer correction if the measurement is too small
-    if nm >= 1e-12 {
-        let m_n = mag / nm; // normalized magnetometer measurement
-        mag_grad = compute_magnetometer_gradient(m_n, q);
-    }
+    let mag_grad = match mag {
+        Some(mag) => {
+            let nm = mag.norm();
+            // Skip magnetometer correction if the measurement is too small
+            if nm >= 1e-12 {
+                let m_n = mag / nm; // normalized magnetometer measurement
+                compute_magnetometer_gradient(m_n, q)
+            } else {
+                NO_CORRECTION
+            }
+        }
+        None => NO_CORRECTION,
+    };
 
-    let na = acc.norm();
-    let mut accel_grad = Grad4 {w: 0.0, x: 0.0, y: 0.0, z: 0.0};
-    // Skip gravity-based accelerometer correction if the measurement doesn't seem like gravity (like during burn or coast)
-    if na >= 0.5 * G && na <= 2.0 * G {
-        let a_n = acc / na; // normalized accelerometer measurement
-        accel_grad = compute_accelerometer_gradient(a_n, q);
-    }
+    let accel_grad = match acc {
+        Some(acc) => {
+            let na = acc.norm();
+            // Skip gravity-based accelerometer correction if the measurement doesn't seem like gravity (like during burn or coast)
+            if na >= 0.5 * G && na <= 2.0 * G {
+                let a_n = acc / na; // normalized accelerometer measurement
+                compute_accelerometer_gradient(a_n, q)
+            } else {
+                NO_CORRECTION
+            }
+        }
+        None => NO_CORRECTION,
+    };
 
     let mut g_combined = accel_grad * AHRS_ACC_BETA + mag_grad * AHRS_MAG_BETA;
 

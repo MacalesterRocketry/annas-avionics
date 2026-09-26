@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicU8, Ordering};
+use crate::utils::flags::{FlagSet, impl_flags};
 use defmt::{Format, bitflags, error, info};
 
 bitflags! {
@@ -12,63 +12,47 @@ bitflags! {
         const GPS         = 1 << 7;
     }
 }
+impl_flags!(Subsystem);
 
-pub static INIT_DONE: AtomicU8 = AtomicU8::new(0);
-pub static INIT_FAILURES: AtomicU8 = AtomicU8::new(0);
-pub static RUNTIME_FAILURES: AtomicU8 = AtomicU8::new(0);
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-fn check_subsystems_any(subsystems: &[Subsystem], subsystem_flags: &AtomicU8) -> bool {
-    subsystems
-        .iter()
-        .any(|s| {
-            check_subsystem(*s, subsystem_flags)
-        })
-}
-fn check_subsystems_all(subsystems: &[Subsystem], subsystem_flags: &AtomicU8) -> bool {
-    subsystems
-        .iter()
-        .all(|s| {
-            check_subsystem(*s, subsystem_flags)
-        })
-}
-fn check_subsystem(subsystem: Subsystem, subsystem_flags: &AtomicU8) -> bool {
-    Subsystem::from_bits_truncate(subsystem_flags.load(Ordering::Acquire)).contains(subsystem)
-}
-fn set_flag(subsystem_flags: &AtomicU8, subsystem: Subsystem) {
-    subsystem_flags.fetch_or(subsystem.bits(), Ordering::Release);
-}
-fn clear_flag(subsystem_flags: &AtomicU8, subsystem: Subsystem) {
-    subsystem_flags.fetch_and(!subsystem.bits(), Ordering::Release);
-}
-fn any_subsystem(subsystem_flags: &AtomicU8) -> bool {
-    Subsystem::from_bits_truncate(subsystem_flags.load(Ordering::Acquire)) != Subsystem::empty()
-}
-fn all_subsystems(subsystem_flags: &AtomicU8) -> bool {
-    Subsystem::from_bits_truncate(subsystem_flags.load(Ordering::Acquire)) == Subsystem::all()
-}
+/// Subsystems that finished initializing successfully.
+pub static INIT_DONE: FlagSet<Subsystem> = FlagSet::new();
+/// Subsystems that tried to initialize and settled into a failed state.
+pub static INIT_FAILURES: FlagSet<Subsystem> = FlagSet::new();
+pub static RUNTIME_FAILURES: FlagSet<Subsystem> = FlagSet::new();
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 pub fn mark_init_complete(subsystem: Subsystem) {
     info!("subsystem {} initialized", subsystem);
-    set_flag(&INIT_DONE, subsystem)
+    INIT_DONE.set(subsystem)
 }
-pub fn is_init_all_complete() -> bool {
-    all_subsystems(&INIT_DONE)
+/// True once every subsystem has reported an init outcome, successful or not.
+/// Makes it possible to differentiate an error from a subsystem that hasn't
+/// finished initializing, so the avionics can transition from Startup to whatever
+/// state makes sense given the presence or absence of any particular errors.
+pub fn is_init_settled() -> bool {
+    (INIT_DONE.get() | INIT_FAILURES.get()) == Subsystem::all()
 }
 /// Clear `subsystem`'s runtime-failure bit, announcing that it is working again.
 pub fn clear_runtime_error(subsystem: Subsystem) {
     if has_runtime_error(subsystem) {
         info!("subsystem {} working again, clearing runtime error", subsystem);
     }
-    clear_flag(&RUNTIME_FAILURES, subsystem);
+    // TODO: This should log to the SD card to say there's no longer an error
+    RUNTIME_FAILURES.clear(subsystem);
 }
 pub fn has_runtime_error(subsystem: Subsystem) -> bool {
-    check_subsystem(subsystem, &RUNTIME_FAILURES)
+    RUNTIME_FAILURES.contains(subsystem)
+}
+pub fn has_any_runtime_error() -> bool {
+    !RUNTIME_FAILURES.is_empty()
+}
+pub fn has_any_init_error() -> bool {
+    !INIT_FAILURES.is_empty()
+}
+pub fn has_any_error() -> bool {
+    has_any_init_error() || has_any_runtime_error()
 }
 
 // ---------------------------------------------------------------------------
@@ -86,15 +70,16 @@ pub trait SubsystemError: Format {
 /// Log `err` and mark its subsystem as having failed to initialize.
 pub fn report_init_error<E: SubsystemError>(err: E) {
     let subsystem = err.subsystem();
-    error!("init error: subsystem {} failed to initialize", subsystem);
-    set_flag(&INIT_FAILURES, subsystem)
+    error!("init error: subsystem {} failed to initialize: {}", subsystem, err);
+    INIT_FAILURES.set(subsystem)
 }
 
 /// Log `err` and set its subsystem's runtime-failure bit. This latches the bit, so
 /// use [`clear_runtime_error`] once the subsystem recovers.
 pub fn report_runtime_error<E: SubsystemError>(err: E) {
     // TODO: This should probably send a message to the SD card.
+    //  Same for init.
     let subsystem = err.subsystem();
-    error!("runtime error: subsystem {} failed at runtime", subsystem);
-    set_flag(&RUNTIME_FAILURES, subsystem)
+    error!("runtime error: subsystem {} failed at runtime: {}", subsystem, err);
+    RUNTIME_FAILURES.set(subsystem)
 }

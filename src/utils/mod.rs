@@ -2,6 +2,7 @@ use embassy_time::{Duration, Instant};
 use serde::{Deserialize, Serialize, Serializer};
 
 pub(crate) mod errors;
+pub(crate) mod flags;
 pub mod math;
 mod hardware_macro;
 pub(crate) mod panic_handler;

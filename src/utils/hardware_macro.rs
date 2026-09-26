@@ -1,3 +1,8 @@
+/// Note: This file is mostly AI-generated.
+/// I'm going to heavily review and refactor it once I get better with Rust macros, I just don't
+/// think that's super necessary for now because it seems to work and most likely won't cause any
+/// runtime issues.
+/// TODO: Figure out this code and refactor
 #[macro_export] macro_rules! define_hardware {
     (
         $main_struct:ident {

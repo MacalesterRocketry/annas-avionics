@@ -1,6 +1,6 @@
 use crate::config::board::{IndicatorsConfig, NUM_LEDS, Neopixel};
 use crate::state::{FlightState, GroundSubState};
-use crate::utils::errors::{Subsystem, SubsystemError, mark_init_complete, report_init_error};
+use crate::utils::errors::{has_any_error, mark_init_complete, report_init_error, Subsystem, SubsystemError};
 use crate::{FLIGHT_STATE, Irqs};
 use defmt::*;
 use defmt_rtt as _;
@@ -77,12 +77,16 @@ pub async fn indicator_loop(
             return;
         }
     };
-    let mut first_run = true;
 
     // Every 20Hz, check the state and proceed with the according buzzer pattern.
     let mut ticker = Ticker::every(Duration::from_hz(20));
     let mut current_state = state_receiver.try_get().unwrap_or(FlightState::PreLaunch(GroundSubState::Startup));
     let mut entered_at = Instant::now();
+
+    let flash_duration = Duration::from_millis(250);
+    let mut last_flash_at = Instant::now(); // for flashing to signal errors
+    let mut current_flash_is_orange = false;
+    let mut currently_rendered_color: Option<LedColor> = None;
     loop {
         ticker.next().await;
         let state_change = state_receiver.try_changed();
@@ -95,19 +99,31 @@ pub async fn indicator_loop(
             None => {}
         }
         let config = current_state.indicator();
+        let mut target_color = config.led;
 
-        if state_change.is_some() || first_run { // no need to update the LED if the state hasn't changed
-            let color = map_color(config.led);
-            set_neopixel_color(&mut neopixel, color, 0.3).await;
-            // TODO: Maybe flash between orange and state color for warnings?
+        if has_any_error() {
+            if Instant::now() - last_flash_at >= flash_duration {
+                current_flash_is_orange = !current_flash_is_orange;
+                last_flash_at = Instant::now();
+            }
+            if current_flash_is_orange {
+                target_color = LedColor::Orange;
+            }
+        } else {
+            current_flash_is_orange = false;
+        }
+        if currently_rendered_color != Some(target_color) { // only update when it actually needs to change color
+            set_neopixel_color(&mut neopixel, map_color(target_color), 0.3).await;
+            currently_rendered_color = Some(target_color);
         }
 
-        let pattern = config.buzzer;
+        let mut pattern = config.buzzer;
+        if has_any_error() {
+            if let BeepCycle::Pulse { on_time, .. } = &mut pattern {
+                *on_time = Duration::from_secs(1); // make the buzzer beep longer when there's an error
+            }
+        }
         drive_buzzer(&mut buzzer, pattern, Instant::now() - entered_at).await;
-
-        if first_run {
-            first_run = false;
-        }
     }
 }
 

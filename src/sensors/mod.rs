@@ -1,58 +1,93 @@
-//! Sensor I/O.
-//!
-//! Each chip lives in its own submodule as a thin driver wrapper (init + read,
-//! no cross-chip knowledge). `Sensors<I2C>` owns one instance of each and
-//! mirrors the C++ `initSensors()` / `readSensors()` pair via `init_all()` /
-//! `read_all()`. Once more than one chip is wired in, the I²C bus should be
-//! shared via `embassy_embedded_hal::shared_bus`, same as the C++ Wire
-//! instance — see the TODO on `Sensors`.
+//! Sensor I/O stuff. Each chip has a file wrapping its driver, which provides a struct
+//! with `init()` and `read()` methods that uses an I2c bus type. These structs are then
+//! owned by the `Sensors` struct, and failed reads go through a debouncer that decides
+//! when a chip is considered faulted.
 
 #![allow(dead_code, unused_variables)]
 
 pub mod adxl375;
 pub mod bmp390;
+pub mod health;
 pub mod lis3mdl;
 pub mod lsm6dsox;
 
-use serde::{Deserialize, Serialize};
+use crate::sensors::health::{FaultDebouncer, SensorFault};
+use crate::utils::errors::{Subsystem, SubsystemError, mark_init_complete, report_init_error};
 use crate::utils::math::{AngularVec3, Vec3};
+use serde::{Deserialize, Serialize};
 
-/// Owns every sensor driver instance sharing the I²C bus.
-/// TODO: add lsm/lis3/bmp fields once their drivers are wired in.
+/// Owns every sensor driver instance sharing the I²C bus, plus the debouncer
+/// deciding when that chip's read failures amount to a fault.
+///
+/// A driver is `None` when it failed to initialize, just like if it stopped reading.
+/// TODO: add lsm/lis3/bmp fields once their drivers are wired in. Maybe using `embassy_embedded_hal::shared_bus`?
 pub struct Sensors<I2C: embedded_hal::i2c::I2c> {
-    pub adxl: adxl375::Adxl<I2C>,
+    adxl: Option<adxl375::Adxl<I2C>>,
+    adxl_health: FaultDebouncer,
 }
 
+/// A failure attributable to one chip, which carries the driver's own error so defmt can actually
+/// log what went wrong.
 #[derive(Debug, defmt::Format)]
-pub enum InitError {
+pub enum SensorError {
     Adxl(adxl375::Error),
 }
 
-/// Bring up every sensor on the shared I²C bus
-pub fn init_all<I2C: embedded_hal::i2c::I2c>(i2c: I2C) -> Result<Sensors<I2C>, InitError> {
-    let adxl = adxl375::Adxl::init(i2c).map_err(InitError::Adxl)?;
-    Ok(Sensors { adxl })
+impl SubsystemError for SensorError {
+    fn subsystem(&self) -> Subsystem {
+        Subsystem::SENSORS
+    }
+}
+
+/// Attempt to initialize every sensor on the shared I²C bus. Errors are marked individually,
+/// but the overall sensor system can still be used even if some chips aren't working.
+pub fn init_all<I2C: embedded_hal::i2c::I2c>(i2c: I2C) -> Sensors<I2C> {
+    // TODO: `Adxl::init` takes the bus by value, so a failure drops it. That is
+    //   harmless while the ADXL is the only chip wired in, but the second driver
+    //   to land needs the bus shared (`embassy_embedded_hal::shared_bus`) so one
+    //   chip's failure cannot take the other chips' bus down with it.
+    let adxl = match adxl375::Adxl::init(i2c) {
+        Ok(driver) => Some(driver),
+        Err(e) => {
+            report_init_error(SensorError::Adxl(e));
+            health::mark_faulted(SensorFault::ADXL);
+            None
+        }
+    };
+
+    if health::faults().is_empty() {
+        mark_init_complete(Subsystem::SENSORS);
+    }
+
+    Sensors {
+        adxl,
+        adxl_health: FaultDebouncer::new(SensorFault::ADXL),
+    }
 }
 
 impl<I2C: embedded_hal::i2c::I2c> Sensors<I2C> {
-    /// Read all four sensors. Returns biased + axis-corrected readings.
-    /// TODO: lsm/lis3/bmp still return defaults until their drivers land.
-    /// TODO: Nothing here checks that a reading is actually *new*. If the loop
-    ///   ever outruns a sensor's output data rate — or a sensor's ODR gets
-    ///   lowered, which the aliasing TODOs in the driver modules argue for — the
-    ///   same sample gets returned twice and AHRS integrates it as if time had
-    ///   passed, which corrupts orientation and doubly so velocity/position.
-    ///   The sensors all expose a data-ready bit (LSM6DSOX `STATUS_REG`, LIS3MDL
+    /// Read every sensor that is answering. Returns biased + axis-corrected
+    /// readings, with `None` for any chip that had nothing to give.
+    ///
+    /// TODO: lsm/lis3/bmp read as absent until their drivers land.
+    /// TODO: Make the sensors return None on stale data.
+    ///   They all expose a data-ready bit (LSM6DSOX `STATUS_REG`, LIS3MDL
     ///   `STATUS_REG`, BMP390 `STATUS`), and their INT pins are already wired
-    ///   through `InterruptConfig`, so the fix is to gate each read on
-    ///   fresh-data and report staleness rather than silently duplicating.
+    ///   through `InterruptConfig`.
     ///   Sensors run at different rates, so this is per-sensor, not per-tick.
+    ///   A stale sensor is the same shape as an absent one — `None` for that
+    ///   chip this tick — so it needs no new plumbing downstream.
     pub async fn read_all(&mut self) -> SensorReadings {
-        let adxl = self.adxl.read().unwrap_or_else(|_| {
-            defmt::warn!("ADXL375 read failed; using zeroed high-G reading for this tick");
-            Default::default()
-        });
-        SensorReadings { adxl, ..Default::default() }
+        let adxl = match self.adxl.as_mut() {
+            Some(adxl) => self
+                .adxl_health
+                .record(adxl.read().map_err(SensorError::Adxl)),
+            None => None,
+        };
+        SensorReadings {
+            adxl,
+            ..Default::default()
+        }
     }
 }
 
@@ -91,33 +126,45 @@ pub struct BmpReading {
     pub altitude: f64,    // m
 }
 
+/// One tick's worth of sensor data. A `None` field is a chip that didn't return any data
+/// this tick, such as from an init or runtime failure or even just the sensor being
+/// slower than the tick rate.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, defmt::Format)]
 pub struct SensorReadings {
-    pub lsm: LsmReading,
-    pub lis3: Lis3Reading,
-    pub adxl: AdxlReading,
-    pub bmp: BmpReading,
+    pub lsm: Option<LsmReading>,
+    pub lis3: Option<Lis3Reading>,
+    pub adxl: Option<AdxlReading>,
+    pub bmp: Option<BmpReading>,
+    launched: bool,
 }
 
 impl SensorReadings {
-    /// Best-available acceleration for AHRS input: the low-G accel, unless
-    /// it's saturated, in which case fall back to the high-G accelerometer.
-    /// Mirrors the switch in `states.cpp`'s `STATE_ASCENT` handler.
-    pub fn merged_accel(&self) -> Vec3 {
-        // TODO: Should probably detect if the low-G is offline and swap in the high-G
-        if self.lsm.has_accel_saturated() {
-            self.adxl.accel
-        } else {
-            self.lsm.accel
+    /// Best-available acceleration for AHRS input: the low-G accel, unless it is saturated or
+    /// absent, in which case the high-G stands in. `None` only when both accelerometers are gone.
+    pub fn merged_accel(&self) -> Option<Vec3> {
+        let high_g = self.adxl.map(|adxl| adxl.accel);
+        match self.lsm {
+            // Saturated, so the low-G reading is clipped: prefer the high-G if
+            // there is one, otherwise keep the clipped value, which is at least
+            // the right direction and a lower bound on the magnitude.
+            Some(lsm) if lsm.has_accel_saturated() => high_g.or(Some(lsm.accel)),
+            Some(lsm) => Some(lsm.accel),
+            None => high_g,
         }
     }
 
-    /// True once the high-G accelerometer has recorded a launch-magnitude
-    /// acceleration spike. Mirrors `hasLaunched()` in the C++ source (the
-    /// interrupt-based detector is wired but currently bypassed in favor of
-    /// a plain magnitude check).
-    pub fn has_launched(&self) -> bool {
-        self.adxl.accel.mag() >= crate::config::LAUNCH_ACCEL_THRESHOLD_G * crate::config::G
+    /// True if an accelerometer has recorded a launch-magnitude acceleration spike.
+    pub fn has_launched(&mut self) -> bool {
+        if !self.launched && self.check_launch_accel() {
+            self.launched = true;
+        }
+        self.launched
+    }
+
+    fn check_launch_accel(&self) -> bool {
+        self.merged_accel().is_some_and(|accel| {
+            accel.mag() >= crate::config::LAUNCH_ACCEL_THRESHOLD_G * crate::config::G
+        })
     }
 }
 

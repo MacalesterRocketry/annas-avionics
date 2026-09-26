@@ -1,4 +1,4 @@
-# Macalester Rocket Avionics
+# Anna's Avionics
 
 This is the code for the avionics stack for the Macalester College High Power Rocketry team. It is currently in in active development. The Arduino version (under the `platformio` directory) is capable of active roll control, and a rewrite to Rust is underway.
 
@@ -10,7 +10,16 @@ Reset the device and attach: `cargo embed reset_attach`
 
 Just attach: `cargo embed attach`
 
-Hardware:
+New hardware plans:
+- Custom PCB containing everything
+- Microcontroller: RP2350B
+- High-G accelerometer: ADXL375
+- Gyroscope and low-G accelerometer: LSM6DSOX
+- Magnetometer: Considering either the MMC5983 or LIS3MDL, leaning towards the former
+- Barometer: BMP390
+- GPS module: Probably ublox MAX-M10S
+
+Hardware (old version):
 - Microcontroller: Adafruit Feather RP2040 Adalogger
 - High-G accelerometer: ADXL375
 - Gyroscope and low-G accelerometer: LSM6DSOX

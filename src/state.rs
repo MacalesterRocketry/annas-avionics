@@ -13,7 +13,7 @@ use crate::config::board::{I2cConfig, PeripheralConfig};
 use crate::navigation::ahrs::{AHRS_STATE, AhrsState};
 use crate::navigation::gps::{GPS_STATE, GpsState};
 use crate::sensors::Sensors;
-use crate::utils::errors::{Subsystem, SubsystemError, is_init_all_complete, mark_init_complete, report_init_error};
+use crate::utils::errors::{Subsystem, SubsystemError, is_init_settled, mark_init_complete, report_init_error};
 use crate::utils::math::{Deg, Quat, roll_deg_to_quat};
 use crate::{FLIGHT_STATE, Irqs, sensors};
 use defmt::{error, info};
@@ -118,7 +118,6 @@ impl FlightState {
                 led: LedColor::Cyan,
                 buzzer: BeepCycle::Silent,
             },
-            // TODO: handle errors somehow (fatal: red, non-fatal: orange)
             _ => StateIndicator {
                 led: LedColor::Off,
                 buzzer: BeepCycle::Silent,
@@ -128,13 +127,8 @@ impl FlightState {
 }
 
 /// Everything that can go wrong bringing up the core system state.
-///
-/// Covers both `BASE_SYSTEM` (the state machine and its watch receivers) and
-/// the sensor bring-up it depends on.
 #[derive(Debug, defmt::Format)]
 pub enum StateError {
-    /// A sensor driver failed to initialize.
-    SensorInit(sensors::InitError),
     /// Too many `FLIGHT_STATE` receivers are in use, so another can't be created.
     NoFlightStateReceiver,
     /// Too many `GPS_STATE` receivers are in use, so another can't be created.
@@ -143,10 +137,7 @@ pub enum StateError {
 
 impl SubsystemError for StateError {
     fn subsystem(&self) -> Subsystem {
-        match self {
-            Self::SensorInit(_) => Subsystem::SENSORS,
-            Self::NoFlightStateReceiver | Self::NoGpsReceiver => Subsystem::BASE_SYSTEM,
-        }
+        Subsystem::BASE_SYSTEM
     }
 }
 
@@ -176,13 +167,17 @@ impl<'a, I2C: embedded_hal::i2c::I2c> SystemState<'a, I2C> {
         let tick_time = now - self.last_tick;
         self.last_tick = now;
 
-        let sensor_data = self.sensors.read_all().await;
-        let gyro = sensor_data.lsm.gyro;
+        let mut sensor_data = self.sensors.read_all().await;
+        let gyro = sensor_data.lsm.map(|lsm| lsm.gyro);
         let accel = sensor_data.merged_accel();
-        let mag = sensor_data.lis3.mag;
+        let mag = sensor_data.lis3.map(|lis3| lis3.mag);
 
-        self.ahrs.update(gyro, accel, mag, now);
-        AHRS_STATE.sender().send(self.ahrs);
+        // If there's no gyroscope data, AHRS can't update.
+        // TODO: Add a validity flag so the control loop disarms itself
+        if let Some(gyro) = gyro {
+            self.ahrs.update(gyro, accel, mag, now);
+            AHRS_STATE.sender().send(self.ahrs);
+        }
 
         let state = self.state.try_get();
         if state.is_none() {
@@ -196,7 +191,7 @@ impl<'a, I2C: embedded_hal::i2c::I2c> SystemState<'a, I2C> {
                 CONTROL_SETPOINT.sender().send(ControlSetpoint::Disarmed);
                 match sub {
                 GroundSubState::Startup => {
-                    if is_init_all_complete() { // TODO: AHRS should probably signal if it's ready too
+                    if is_init_settled() { // TODO: AHRS should probably signal if it's ready too
                         self.transition_to(FlightState::PreLaunch(GroundSubState::ReadyToLaunch(ReadyToLaunchSubState::WaitingForGPS)));
                     }
                 }
@@ -324,17 +319,10 @@ pub async fn system_loop(i2c_config: I2cConfig, peripheral_config: PeripheralCon
     info!("GPIO initialized");
 
     info!("initializing sensors");
-    let sensors = match sensors::init_all(i2c) {
-        Ok(sensors) => {
-            mark_init_complete(Subsystem::SENSORS);
-            sensors
-        }
-        Err(e) => {
-            report_init_error(StateError::SensorInit(e));
-            defmt::panic!("Failed to initialize sensors");
-            // TODO: What if some sensors are fine but some fail? We can tolerate the loss of a magnetometer, but not a gyroscope.
-        }
-    };
+    // `init_all` handles sensor errors itself, and some missing sensors are
+    // tolerable, so we don't need any error handling on this. Each sensor
+    // consumer handles missing data instead.
+    let sensors = sensors::init_all(i2c);
     info!("sensors initialized");
 
     info!("initializing system state");

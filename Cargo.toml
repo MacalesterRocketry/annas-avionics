@@ -1,5 +1,5 @@
 [package]
-name = "rocket-avionics"
+name = "annas-avionics"
 version = "0.1.0"
 edition = "2024"
 description = "Macalester rocket avionics, Rust + Embassy port for RP2350"

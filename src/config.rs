@@ -195,7 +195,7 @@ pub mod board {
             bmp_int: PIN_13,
         },
         indicators: IndicatorsConfig {
-            buzzer: PIN_43, // Note: Any changes to this should also be changed in errors.rs
+            buzzer: PIN_43, // Note: Any changes to this should also be changed in the panic handler, TODO: maybe make a constant
             neopixel: PIN_25,
             neopixel_pio: PIO0,
             neopixel_dma: DMA_CH0,
