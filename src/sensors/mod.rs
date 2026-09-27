@@ -15,6 +15,11 @@ use crate::sensors::health::{FaultDebouncer, SensorFault};
 use crate::utils::errors::{Subsystem, SubsystemError, mark_init_complete, report_init_error};
 use crate::utils::math::{AngularVec3, Vec3};
 use serde::{Deserialize, Serialize};
+use crate::config::G;
+use crate::sensors::adxl375::AdxlReading;
+use crate::sensors::bmp390::BmpReading;
+use crate::sensors::lis3mdl::Lis3Reading;
+use crate::sensors::lsm6dsox::LsmReading;
 
 /// Owns every sensor driver instance sharing the I²C bus, plus the debouncer
 /// deciding when that chip's read failures amount to a fault.
@@ -91,39 +96,45 @@ impl<I2C: embedded_hal::i2c::I2c> Sensors<I2C> {
     }
 }
 
-#[derive(Default, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, defmt::Format)]
-pub struct LsmReading {
-    /// Body-frame linear acceleration (m/s²), bias-subtracted.
-    pub accel: Vec3,
-    /// Body-frame angular rate (rad/s), bias-subtracted.
-    pub gyro: AngularVec3,
-    /// Die temperature (°C).
-    pub temperature: f64,
+pub trait Sensor {
+    type Bus: embedded_hal::i2c::I2c;
+    type Reading;
+    type Error;
+
+    /// Initialize the sensor with the given I2C bus.
+    fn init(i2c: Self::Bus) -> Result<Self, Self::Error> where Self: Sized;
+    /// Read the sensor, returning a bias-corrected reading in the body frame, generally in SI units.
+    /// Returns `None` if the chip is not responding or has no new data.
+    fn read(&mut self) -> Result<Self::Reading, Self::Error> where Self: Sized;
 }
 
-impl LsmReading {
-    pub fn has_accel_saturated(&self) -> bool {
-        self.accel.mag() >= crate::config::ACCELEROMETER_SWITCH_THRESHOLD
+pub trait AccelerometerReading {
+    fn saturation_threshold_g(&self) -> f64;
+    /// Return the body-frame linear acceleration (m/s²), bias-subtracted.
+    fn accel(&self) -> Vec3;
+    fn has_accel_saturated(&self) -> bool {
+        self.accel().mag() >= (self.saturation_threshold_g() * 0.99 * G)
     }
 }
-
-#[derive(Default, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, defmt::Format)]
-pub struct Lis3Reading {
-    /// Body-frame magnetic field (µT), hard-iron corrected.
-    pub mag: Vec3,
+pub trait GyroscopeReading {
+    /// Return the body-frame angular rate (rad/s), bias-subtracted.
+    fn gyro(&self) -> AngularVec3;
 }
-
-#[derive(Default, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, defmt::Format)]
-pub struct AdxlReading {
-    /// Body-frame high-G acceleration (m/s²), bias-subtracted.
-    pub accel: Vec3,
+pub trait MagnetometerReading {
+    /// Return the body-frame magnetic field (µT), bias-subtracted.
+    fn mag(&self) -> Vec3;
 }
-
-#[derive(Default, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, defmt::Format)]
-pub struct BmpReading {
-    pub pressure: f64,    // Pa
-    pub temperature: f64, // °C
-    pub altitude: f64,    // m
+pub trait TemperatureReading {
+    /// Return the die temperature or outside temperature (°C).
+    fn temperature(&self) -> f64;
+}
+pub trait PressureReading {
+    /// Return the barometric pressure (Pa).
+    fn pressure(&self) -> f64;
+}
+pub trait AltitudeReading {
+    /// Return the barometric altitude (m).
+    fn altitude(&self) -> f64;
 }
 
 /// One tick's worth of sensor data. A `None` field is a chip that didn't return any data
@@ -163,7 +174,7 @@ impl SensorReadings {
 
     fn check_launch_accel(&self) -> bool {
         self.merged_accel().is_some_and(|accel| {
-            accel.mag() >= crate::config::LAUNCH_ACCEL_THRESHOLD_G * crate::config::G
+            accel.mag() >= crate::config::LAUNCH_ACCEL_THRESHOLD_G * G
         })
     }
 }

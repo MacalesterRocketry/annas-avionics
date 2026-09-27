@@ -6,25 +6,10 @@
 
 #![allow(dead_code)]
 
-use crate::utils::math::AngularVec3;
+use nalgebra::Vector3;
+use crate::utils::math::{AngularVec3, Vec3};
 
 // ─────────────────────────────── debug knobs ────────────────────────────────
-// In the C++ these are `#define X 0/1` preprocessor flags. Here they're plain
-// `const bool` — the optimizer constant-folds them just like the preprocessor,
-// and they're typesafe.
-pub const DEBUG: bool = false;
-pub const DEBUG_SD: bool = false;
-pub const DEBUG_PRINT_SENSORS: bool = false;
-pub const DEBUG_PRINT_ORIENTATION: bool = false;
-pub const DEBUG_PRINT_ROLL_CONTROL: bool = false;
-
-pub const PID_TUNING: bool = false;
-pub const SERVO_TESTING: bool = false;
-
-pub const PROFILING: bool = false;
-pub const PROFILING_SAMPLES: usize = 100;
-
-pub const SYNC_INTERVAL_MS: u64 = 5_000;
 
 pub const USE_GPS: bool = true;
 pub const USE_TURN_SIGNALS: bool = true;
@@ -35,28 +20,31 @@ pub const HAS_DROGUE_CHUTE: bool = true;
 pub const G: f64 = 9.805_79;
 
 // Magnetometer hard-iron offsets (µT). Calibrate per-flight.
-pub const MAG_BIAS_X: f64 = -35.63;
-pub const MAG_BIAS_Y: f64 = 19.96;
-pub const MAG_BIAS_Z: f64 = -33.43;
+pub const LIS3_BIAS: AngularVec3 = AngularVec3 {
+    pitch: -35.63,
+    yaw: 19.96,
+    roll: -33.43
+};
 
-// High-G (ADXL375) zero offsets. NOTE from C++ source: the ADXL375 may apply
-// internal gravity correction — verify on bench before trusting these.
-pub const HIGHG_BIAS_X: f64 = 9.8; // TODO: implement this, I don't think it's currently used
-pub const HIGHG_BIAS_Y: f64 = 7.85;
-pub const HIGHG_BIAS_Z: f64 = 9.8 - G;
-pub const HIGHG_TRIM_X: i8 = -5; // raw LSB counts, not m/s²
-pub const HIGHG_TRIM_Y: i8 = -4;
-pub const HIGHG_TRIM_Z: i8 = 0;
+pub const ADXL_BIAS: Vec3 = Vec3 {
+    x: 9.8,
+    y: 7.85,
+    z: 9.8 - G
+};
+pub const ADXL_TRIM: Vector3<i8> = Vector3::new(-5, -4, 0); // raw LSB counts, not m/s²
 
-// Low-G (LSM6DSOX accel) zero offsets.
-pub const LOWG_BIAS_X: f64 = 0.05;
-pub const LOWG_BIAS_Y: f64 = 0.03;
-pub const LOWG_BIAS_Z: f64 = 10.03 - G;
+pub const LSM_ACCEL_BIAS: Vec3 = Vec3 {
+    x: 0.05,
+    y: 0.03,
+    z: 10.03 - G
+};
 
 // Gyro zero-rate offsets (rad/s).
-pub const GYRO_BIAS_X: f64 = -0.01;
-pub const GYRO_BIAS_Y: f64 = 0.0;
-pub const GYRO_BIAS_Z: f64 = 0.0;
+pub const LSM_GYRO_BIAS: AngularVec3 = AngularVec3 {
+    pitch: -0.01,
+    yaw: 0.0,
+    roll: 0.0
+};
 
 // ───────────────────────────── AHRS constants ───────────────────────────────
 /// Madgwick β for accelerometer correction. Higher → trust accel more, faster
@@ -135,8 +123,6 @@ pub const FIN_MIX: board::FinMix = board::FinMix {
     yplus: AngularVec3 { pitch: 0.0, yaw: 0.0, roll: 1.0 },
     yminus: AngularVec3 { pitch: 0.0, yaw: 0.0, roll: 1.0 },
 };
-/// LSM6DSOX low-G accel saturates at 16 g; switch to ADXL375 above this.
-pub const ACCELEROMETER_SWITCH_THRESHOLD: f64 = 15.9 * G;
 
 // ──────────────────────────── battery divider ───────────────────────────────
 pub const BATTERY_VOLTAGE_R1: f64 = 100_000.0;

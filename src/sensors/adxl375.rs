@@ -12,11 +12,22 @@
 //!   once the low-G accel saturates, and that path is not.
 
 use adxl3xx::{Adxl375 as Adxl3xxDriver, AdxlBusI2c};
-use embedded_hal::i2c::I2c as I2cBus;
-
-use crate::config::{HIGHG_BIAS_X, HIGHG_BIAS_Y, HIGHG_BIAS_Z};
-use crate::sensors::{transform_sensor_axes, AdxlReading};
+use embedded_hal::i2c::I2c;
+use serde::{Deserialize, Serialize};
+use crate::config::{G, ADXL_BIAS};
+use crate::sensors::{transform_sensor_axes, Sensor, AccelerometerReading};
 use crate::utils::math::Vec3;
+
+#[derive(Default, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, defmt::Format)]
+pub struct AdxlReading {
+    /// Body-frame high-G acceleration (m/s²), bias-subtracted.
+    pub accel: Vec3,
+}
+
+impl AccelerometerReading for AdxlReading {
+    fn saturation_threshold_g(&self) -> f64 { 200.0 }
+    fn accel(&self) -> Vec3 { self.accel }
+}
 
 #[derive(Debug, defmt::Format)]
 pub enum Error {
@@ -28,17 +39,21 @@ pub enum Error {
     Read,
 }
 
-pub struct Adxl<I2C: I2cBus> {
+pub struct Adxl<I2C: I2c> {
     driver: Adxl3xxDriver<AdxlBusI2c<I2C>>,
 }
 
-impl<I2C: I2cBus> Adxl<I2C> {
+impl<I2C: I2c> Sensor for Adxl<I2C> {
+    type Bus = I2C;
+    type Reading = AdxlReading;
+    type Error = Error;
+
     /// Bring up the high-G accelerometer: validate device ID, reset to
     /// datasheet defaults (800 Hz, FIFO stream), and run axis-offset
     /// calibration. Mirrors `initHighGAccelerometer()` in the C++ source,
     /// minus the activity-interrupt wiring — launch detection currently
     /// polls magnitude instead (see `SensorReadings::has_launched`).
-    pub fn init(i2c: I2C) -> Result<Self, Error> {
+    fn init(i2c: I2C) -> Result<Self, Error> where Self: Sized {
         let bus = AdxlBusI2c { i2c, addr: adxl3xx::reg::ADXL_ADDR };
         let mut driver = Adxl3xxDriver::new(bus).map_err(|_| Error::Init)?;
 
@@ -51,17 +66,13 @@ impl<I2C: I2cBus> Adxl<I2C> {
     }
 
     /// Read XYZ, bias-corrected to m/s².
-    pub fn read(&mut self) -> Result<AdxlReading, Error> {
+    fn read(&mut self) -> Result<AdxlReading, Error> {
         let raw: Vec3 = self.driver.read_axis().map_err(|_| Error::Read)?.into();
         // The sensor is mounted in a different orientation than we want, so we need to transform the axes.
-        let transformed = transform_sensor_axes(raw);
+        let transformed = transform_sensor_axes(raw * G);
         // TODO: return None if it hasn't yet updated (DATA_READY register)
         Ok(AdxlReading {
-            accel: Vec3::new(
-                transformed.x - HIGHG_BIAS_X,
-                transformed.y - HIGHG_BIAS_Y,
-                transformed.z - HIGHG_BIAS_Z,
-            ),
+            accel: transformed - ADXL_BIAS,
         })
     }
 }

@@ -85,7 +85,9 @@ heapless = { version = "0.9", features = ["defmt"] }
 lsm6dsox  = "2.1" # gyro + low-G accel
 mmc5983_rs = "0.0.1" # magnetometer
 bmp390-rs = "0.4" # barometer and temperature sensor
-adxl3xx   = "0.1" # high-G accelerometer (ADXL375)
+adxl3xx   = "0.2" # high-G accelerometer (ADXL375)
+
+measurements = { version = "0.11", default-features = false, features = ["serde"] }
 
 [features]
 default = ["hw-v3"]

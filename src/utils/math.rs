@@ -11,6 +11,7 @@ use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 // libm provides no_std math intrinsics. On host (cargo test) we still use libm
 // for bit-identical behavior with the firmware build.
 use libm::{asin, atan2, cos, sin, sqrt};
+use lsm6dsox::accelerometer::vector::F32x3;
 use serde::{Deserialize, Serialize};
 
 pub type Rad = f64;
@@ -162,6 +163,18 @@ impl From<Vec3> for (i16, i16, i16) {
         (v.x as i16, v.y as i16, v.z as i16)
     }
 }
+impl From<F32x3> for Vec3 {
+    #[inline]
+    fn from(v: F32x3) -> Self {
+        Self { x: v.x as f64, y: v.y as f64, z: v.z as f64 }
+    }
+}
+impl From<Vec3> for F32x3 {
+    #[inline]
+    fn from(v: Vec3) -> Self {
+        F32x3 { x: v.x as f32, y: v.y as f32, z: v.z as f32 }
+    }
+}
 
 // Scalar ops
 impl Mul<f64> for Vec3 {
@@ -283,6 +296,24 @@ impl Into<Vec3> for AngularVec3 {
     #[inline]
     fn into(self) -> Vec3 {
         Vec3::new(self.pitch, self.yaw, self.roll)
+    }
+}
+
+impl From<lsm6dsox::AngularRate> for AngularVec3 {
+    #[inline]
+    fn from(v: lsm6dsox::AngularRate) -> Self {
+        Self { pitch: v.x.as_radians_per_second(), yaw: v.y.as_radians_per_second(), roll: v.z.as_radians_per_second() }
+    }
+}
+
+impl Into<lsm6dsox::AngularRate> for AngularVec3 {
+    #[inline]
+    fn into(self) -> lsm6dsox::AngularRate {
+        lsm6dsox::AngularRate {
+            x: measurements::AngularVelocity::from_radians_per_second(self.pitch),
+            y: measurements::AngularVelocity::from_radians_per_second(self.yaw),
+            z: measurements::AngularVelocity::from_radians_per_second(self.roll),
+        }
     }
 }
 
