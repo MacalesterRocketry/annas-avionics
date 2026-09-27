@@ -47,10 +47,10 @@ libm = "0.2"
 nalgebra = { version = "0.35", default-features = false, features = ["libm", "serde-serialize-no-std"] }
 
 # Bitflags for the Error mask (mirrors enum Error : uint16_t bitmask)
-bitflags = "2.11"
+bitflags = "2.13"
 
 # Static cells for global storage that must be initialized once
-static_cell = "2.1"
+static_cell = { version = "2.1", features = ["nightly"] }
 
 # Unit definitions using UOM
 uom = { version = "0.38", default-features = false, features = [ "f64", "si", "serde" ] }

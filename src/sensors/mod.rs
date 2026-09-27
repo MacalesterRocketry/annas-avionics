@@ -11,24 +11,30 @@ pub mod health;
 pub mod lis3mdl;
 pub mod lsm6dsox;
 
-use crate::sensors::health::{FaultDebouncer, SensorFault};
-use crate::utils::errors::{Subsystem, SubsystemError, mark_init_complete, report_init_error};
-use crate::utils::math::{AngularVec3, Vec3};
-use serde::{Deserialize, Serialize};
 use crate::config::G;
 use crate::sensors::adxl375::AdxlReading;
 use crate::sensors::bmp390::BmpReading;
+use crate::sensors::health::{FaultDebouncer, SensorFault};
 use crate::sensors::lis3mdl::Lis3Reading;
 use crate::sensors::lsm6dsox::LsmReading;
+use crate::utils::errors::{Subsystem, SubsystemError, mark_init_complete, report_init_error};
+use crate::utils::math::{AngularVec3, Vec3};
+use core::cell::RefCell;
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embedded_hal::i2c::I2c;
+use serde::{Deserialize, Serialize};
 
 /// Owns every sensor driver instance sharing the I²C bus, plus the debouncer
 /// deciding when that chip's read failures amount to a fault.
 ///
 /// A driver is `None` when it failed to initialize, just like if it stopped reading.
 /// TODO: add lsm/lis3/bmp fields once their drivers are wired in. Maybe using `embassy_embedded_hal::shared_bus`?
-pub struct Sensors<I2C: embedded_hal::i2c::I2c> {
+pub struct Sensors<I2C: I2c> {
     adxl: Option<adxl375::Adxl<I2C>>,
-    adxl_health: FaultDebouncer,
+    adxl_health: FaultDebouncer, // TODO: Maybe integrate these health values into the actual sensor reading?
+    lsm: Option<lsm6dsox::Lsm<I2C>>,
+    lsm_health: FaultDebouncer,
 }
 
 /// A failure attributable to one chip, which carries the driver's own error so defmt can actually
@@ -36,6 +42,7 @@ pub struct Sensors<I2C: embedded_hal::i2c::I2c> {
 #[derive(Debug, defmt::Format)]
 pub enum SensorError {
     Adxl(adxl375::Error),
+    Lsm(lsm6dsox::Error),
 }
 
 impl SubsystemError for SensorError {
@@ -46,16 +53,31 @@ impl SubsystemError for SensorError {
 
 /// Attempt to initialize every sensor on the shared I²C bus. Errors are marked individually,
 /// but the overall sensor system can still be used even if some chips aren't working.
-pub fn init_all<I2C: embedded_hal::i2c::I2c>(i2c: I2C) -> Sensors<I2C> {
-    // TODO: `Adxl::init` takes the bus by value, so a failure drops it. That is
-    //   harmless while the ADXL is the only chip wired in, but the second driver
-    //   to land needs the bus shared (`embassy_embedded_hal::shared_bus`) so one
-    //   chip's failure cannot take the other chips' bus down with it.
-    let adxl = match adxl375::Adxl::init(i2c) {
+pub fn init_all<I2C: I2c>(i2c: I2C) -> Sensors<I2C> {
+    let mutex: &'static Mutex<NoopRawMutex, RefCell<I2C>> = static_cell::make_static!(
+        Mutex::new(RefCell::new(i2c))
+    );
+    macro_rules! get_bus {
+        ($mutex:expr) => {
+            embassy_embedded_hal::shared_bus::blocking::i2c::I2cDevice::new($mutex)
+        };
+    }
+
+    let adxl_bus = get_bus!(&mutex);
+    let adxl = match adxl375::Adxl::init(adxl_bus) {
         Ok(driver) => Some(driver),
         Err(e) => {
             report_init_error(SensorError::Adxl(e));
             health::mark_faulted(SensorFault::ADXL);
+            None
+        }
+    };
+    let lsm_bus = get_bus!(&mutex);
+    let lsm = match lsm6dsox::Lsm::init(lsm_bus) {
+        Ok(driver) => Some(driver),
+        Err(e) => {
+            report_init_error(SensorError::Lsm(e));
+            health::mark_faulted(SensorFault::LSM);
             None
         }
     };
@@ -67,14 +89,16 @@ pub fn init_all<I2C: embedded_hal::i2c::I2c>(i2c: I2C) -> Sensors<I2C> {
     Sensors {
         adxl,
         adxl_health: FaultDebouncer::new(SensorFault::ADXL),
+        lsm,
+        lsm_health: FaultDebouncer::new(SensorFault::LSM),
     }
 }
 
-impl<I2C: embedded_hal::i2c::I2c> Sensors<I2C> {
+impl<I2C: I2c> Sensors<I2C> {
     /// Read every sensor that is answering. Returns biased + axis-corrected
     /// readings, with `None` for any chip that had nothing to give.
     ///
-    /// TODO: lsm/lis3/bmp read as absent until their drivers land.
+    /// TODO: lis3 and bmp read as absent until their drivers land.
     /// TODO: Make the sensors return None on stale data.
     ///   They all expose a data-ready bit (LSM6DSOX `STATUS_REG`, LIS3MDL
     ///   `STATUS_REG`, BMP390 `STATUS`), and their INT pins are already wired
@@ -89,15 +113,22 @@ impl<I2C: embedded_hal::i2c::I2c> Sensors<I2C> {
                 .record(adxl.read().map_err(SensorError::Adxl)),
             None => None,
         };
+        let lsm = match self.lsm.as_mut() {
+            Some(lsm) => self
+                .lsm_health
+                .record(lsm.read().map_err(SensorError::Lsm)),
+            None => None,
+        };
         SensorReadings {
             adxl,
+            lsm,
             ..Default::default()
         }
     }
 }
 
 pub trait Sensor {
-    type Bus: embedded_hal::i2c::I2c;
+    type Bus: I2c;
     type Reading;
     type Error;
 

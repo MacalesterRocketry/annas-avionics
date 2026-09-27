@@ -60,9 +60,89 @@ impl TemperatureReading for LsmReading {
 }
 
 #[derive(Debug, defmt::Format)]
-pub enum Error<I2C: I2c> {
-    Init(lsm6dsox::Error<I2C::Error>),
-    Read,
+pub enum Error {
+    Init(LsmError),
+    Read(LsmError),
+}
+#[derive(Debug, defmt::Format)]
+pub enum LsmError {
+    /// An error occured during a I2C write operation
+    I2cWriteError,
+    /// An error occured during a I2C read operation
+    I2cReadError,
+    /// Reset of the LSM6DSOX failed
+    ResetFailed,
+    /// No data was ready to be read
+    NoDataReady,
+    /// Invalid or unexpected data was read
+    InvalidData,
+    /// A parameter was incorrect
+    InvalidInput,
+    /// Operation or configuration not supported
+    NotSupported,
+
+    // Accelerometer-specific errors from the `accelerometer` crate
+    /// Error in the underlying communications bus (e.g. I2C, SPI)
+    AccelBus,
+    /// Device invalid or other hardware error
+    AccelDevice,
+    /// Device is in an invalid mode to complete the requested operation
+    AccelMode,
+    /// Invalid parameter
+    AccelParam,
+}
+type DriverError<I2C: I2c> = lsm6dsox::Error<I2C::Error>;
+type AccelError<I2C: I2c> = accelerometer::Error<DriverError<I2C>>;
+
+impl<E: embedded_hal::i2c::Error> From<&lsm6dsox::Error<E>> for LsmError {
+    fn from(error: &lsm6dsox::Error<E>) -> Self {
+        match error {
+            lsm6dsox::Error::I2cWriteError(_) => LsmError::I2cWriteError,
+            lsm6dsox::Error::I2cReadError(_) => LsmError::I2cReadError,
+            lsm6dsox::Error::ResetFailed => LsmError::ResetFailed,
+            lsm6dsox::Error::NoDataReady => LsmError::NoDataReady,
+            lsm6dsox::Error::InvalidData => LsmError::InvalidData,
+            lsm6dsox::Error::InvalidInput => LsmError::InvalidInput,
+            lsm6dsox::Error::NotSupported => LsmError::NotSupported,
+        }
+    }
+}
+impl<E: embedded_hal::i2c::Error> From<lsm6dsox::Error<E>> for LsmError {
+    fn from(err: lsm6dsox::Error<E>) -> Self { (&err).into() }
+}
+
+impl<E: embedded_hal::i2c::Error> From<accelerometer::Error<lsm6dsox::Error<E>>> for LsmError {
+    fn from(error: accelerometer::Error<lsm6dsox::Error<E>>) -> Self {
+        if let Some(cause) = error.cause() {
+            return cause.into();
+        }
+
+        // Fallback to the generic error kind
+        match error.kind() {
+            accelerometer::ErrorKind::Bus => LsmError::AccelBus,
+            accelerometer::ErrorKind::Device => LsmError::AccelDevice,
+            accelerometer::ErrorKind::Mode => LsmError::AccelMode,
+            accelerometer::ErrorKind::Param => LsmError::AccelParam,
+        }
+    }
+}
+
+trait LsmResultExt<T> {
+    fn init_err(self) -> Result<T, Error>;
+    fn read_err(self) -> Result<T, Error>;
+}
+
+// Blanket implementation for any Result that has an error convertable to LsmError
+impl<T, E> LsmResultExt<T> for Result<T, E>
+where
+    E: Into<LsmError>,
+{
+    fn init_err(self) -> Result<T, Error> {
+        self.map_err(|e| Error::Init(e.into()))
+    }
+    fn read_err(self) -> Result<T, Error> {
+        self.map_err(|e| Error::Read(e.into()))
+    }
 }
 
 pub struct Lsm<I2C: I2c> {
@@ -72,17 +152,17 @@ pub struct Lsm<I2C: I2c> {
 impl<I2C: I2c> Sensor for Lsm<I2C> {
     type Bus = I2C;
     type Reading = LsmReading;
-    type Error = Error<I2C>;
+    type Error = Error;
 
-    fn init(i2c: I2C) -> Result<Self, Error<I2C>> {
+    fn init(i2c: I2C) -> Result<Self, Error> {
         // TODO: Figure out what address I actually need to use
         let mut driver = Lsm6dsox::new(i2c, SlaveAddress::Low, Delay);
 
-        driver.setup().map_err(|e| Error::Init(e))?;
-        driver.set_accel_sample_rate(DataRate::Freq416Hz).map_err(|e| Error::Init(e))?; // TODO: tune based on loop speed
-        driver.set_accel_scale(AccelerometerScale::Accel16g).map_err(|e| Error::Init(e))?;
-        driver.enable_interrupts(true).map_err(|e| Error::Init(e))?;
-        driver.map_interrupt(InterruptSource::EmbeddedFunctions, InterruptLine::INT1, true).map_err(|e| Error::Init(e))?;
+        driver.setup().init_err()?;
+        driver.set_accel_sample_rate(DataRate::Freq416Hz).init_err()?; // TODO: tune based on loop speed
+        driver.set_accel_scale(AccelerometerScale::Accel16g).init_err()?;
+        driver.enable_interrupts(true).init_err()?;
+        driver.map_interrupt(InterruptSource::EmbeddedFunctions, InterruptLine::INT1, true).init_err()?;
         if let Ok(reading) = driver.accel_norm() {
             info!("Acceleration: {:?}", Debug2Format(&reading));
         }
@@ -90,12 +170,12 @@ impl<I2C: I2c> Sensor for Lsm<I2C> {
     }
 
     /// Read XYZ, bias-corrected to m/s².
-    fn read(&mut self) -> Result<LsmReading, Error<I2C>> {
-        let raw_accel: Vec3 = self.driver.accel_norm().map_err(|e| Error::Read)?.into();
+    fn read(&mut self) -> Result<LsmReading, Error> {
+        let raw_accel: Vec3 = self.driver.accel_norm().read_err()?.into();
         // The sensor is mounted in a different orientation than we want, so we need to transform the axes.
         let transformed_accel = transform_sensor_axes(raw_accel * G);
-        let temperature = self.driver.temperature().map_err(|e| Error::Read)?;
-        let gyro: AngularVec3 = self.driver.angular_rate().map_err(|e| Error::Read)?.into();
+        let temperature = self.driver.temperature().read_err()?;
+        let gyro: AngularVec3 = self.driver.angular_rate().read_err()?.into();
         // TODO: return None if it hasn't yet updated (DATA_READY register)
         Ok(LsmReading {
             accel: transformed_accel - LSM_ACCEL_BIAS,
