@@ -5,8 +5,6 @@
 //! sample (driven by `embassy_time::Ticker`) plus an indicator subtask that
 //! drives the NeoPixel + buzzer. See PORTING_PLAN.md "state machine" section.
 
-#![allow(dead_code, unused_variables)]
-
 use crate::communication::indication::{BeepCycle, LedColor, StateIndicator};
 use crate::config::HAS_DROGUE_CHUTE;
 use crate::config::board::{I2cConfig, PeripheralConfig};
@@ -15,10 +13,12 @@ use crate::navigation::gps::{GPS_STATE, GpsState};
 use crate::sensors::Sensors;
 use crate::utils::errors::{Subsystem, SubsystemError, is_init_settled, mark_init_complete, report_init_error};
 use crate::utils::math::{Deg, Quat, roll_deg_to_quat};
-use crate::{FLIGHT_STATE, Irqs, sensors};
+use crate::{FLIGHT_STATE, I2C_BUS_CELL, Irqs, sensors};
+use core::cell::RefCell;
 use defmt::{error, info};
 use embassy_rp::gpio::Input;
 use embassy_rp::i2c;
+use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::watch::{Receiver, Watch};
 use embassy_time::{Duration, Instant, Ticker};
@@ -322,7 +322,8 @@ pub async fn system_loop(i2c_config: I2cConfig, peripheral_config: PeripheralCon
     // `init_all` handles sensor errors itself, and some missing sensors are
     // tolerable, so we don't need any error handling on this. Each sensor
     // consumer handles missing data instead.
-    let sensors = sensors::init_all(i2c);
+    let i2c_mutex = I2C_BUS_CELL.init(Mutex::new(RefCell::new(i2c)));
+    let sensors = sensors::init_all(i2c_mutex);
     info!("sensors initialized");
 
     info!("initializing system state");

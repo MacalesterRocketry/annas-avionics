@@ -92,7 +92,7 @@ pub enum LsmError {
     AccelParam,
 }
 type DriverError<I2C: I2c> = lsm6dsox::Error<I2C::Error>;
-type AccelError<I2C: I2c> = accelerometer::Error<DriverError<I2C>>;
+type AccelError<I2C> = accelerometer::Error<DriverError<I2C>>;
 
 impl<E: embedded_hal::i2c::Error> From<&lsm6dsox::Error<E>> for LsmError {
     fn from(error: &lsm6dsox::Error<E>) -> Self {

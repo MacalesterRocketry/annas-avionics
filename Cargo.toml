@@ -50,7 +50,7 @@ nalgebra = { version = "0.35", default-features = false, features = ["libm", "se
 bitflags = "2.13"
 
 # Static cells for global storage that must be initialized once
-static_cell = { version = "2.1", features = ["nightly"] }
+static_cell = "2.1"
 
 # Unit definitions using UOM
 uom = { version = "0.38", default-features = false, features = [ "f64", "si", "serde" ] }

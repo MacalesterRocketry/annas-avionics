@@ -28,17 +28,19 @@ SECTIONS {
      * Goes after .vector_table, to keep it in the first 4K of flash
      * where the Boot ROM (and picotool) can find it
      */
-    .start_block : ALIGN(4)
+    .start_block : ALIGN(8)
     {
         __start_block_addr = .;
         KEEP(*(.start_block));
         KEEP(*(.boot_info));
+        /* Pad the end of the block to ensure it finishes on an 8-byte boundary */
+        . = ALIGN(8);
     } > FLASH
 
 } INSERT AFTER .vector_table;
 
-/* move .text to start /after/ the boot info */
-_stext = ADDR(.start_block) + SIZEOF(.start_block);
+/* move .text to start /after/ the boot info, strictly aligned to 8 bytes */
+_stext = ALIGN(ADDR(.start_block) + SIZEOF(.start_block), 8);
 
 SECTIONS {
     /* ### Picotool 'Binary Info' Entries

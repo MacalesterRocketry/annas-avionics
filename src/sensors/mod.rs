@@ -20,8 +20,9 @@ use crate::sensors::lsm6dsox::LsmReading;
 use crate::utils::errors::{Subsystem, SubsystemError, mark_init_complete, report_init_error};
 use crate::utils::math::{AngularVec3, Vec3};
 use core::cell::RefCell;
+use embassy_embedded_hal::shared_bus::blocking::i2c::I2cDevice;
 use embassy_sync::blocking_mutex::Mutex;
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::blocking_mutex::raw::RawMutex;
 use embedded_hal::i2c::I2c;
 use serde::{Deserialize, Serialize};
 
@@ -53,10 +54,7 @@ impl SubsystemError for SensorError {
 
 /// Attempt to initialize every sensor on the shared I²C bus. Errors are marked individually,
 /// but the overall sensor system can still be used even if some chips aren't working.
-pub fn init_all<I2C: I2c>(i2c: I2C) -> Sensors<I2C> {
-    let mutex: &'static Mutex<NoopRawMutex, RefCell<I2C>> = static_cell::make_static!(
-        Mutex::new(RefCell::new(i2c))
-    );
+pub fn init_all<M: RawMutex, BUS: I2c>(mutex: &'static Mutex<M, RefCell<BUS>>) -> Sensors<I2cDevice<'static, M, BUS>> {
     macro_rules! get_bus {
         ($mutex:expr) => {
             embassy_embedded_hal::shared_bus::blocking::i2c::I2cDevice::new($mutex)

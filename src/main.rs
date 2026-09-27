@@ -12,6 +12,7 @@
 
 extern crate uom;
 
+use core::cell::RefCell;
 use crate::communication::sdcard::sd_logging_loop;
 use crate::config::board::{GpsConfig, I2cConfig, IndicatorsConfig, InterruptConfig, PeripheralConfig, SdConfig};
 use crate::config::board::ServoConfig;
@@ -26,7 +27,8 @@ use embassy_rp::multicore::{Stack, spawn_core1};
 use embassy_rp::peripherals::{DMA_CH0, I2C0, PIO0, UART0};
 use embassy_rp::{bind_interrupts, dma, pio};
 use embassy_rp::{i2c, uart};
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
 use embassy_sync::watch::Watch;
 use static_cell::StaticCell;
 
@@ -57,6 +59,9 @@ static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
 
 pub static FLIGHT_STATE: Watch<CriticalSectionRawMutex, FlightState, 2> = Watch::new();
+
+// TODO: Move this I2C0 out into a type variable
+pub static I2C_BUS_CELL: StaticCell<Mutex<NoopRawMutex, RefCell<i2c::I2c<I2C0, i2c::Async>>>> = StaticCell::new();
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) -> ! {
