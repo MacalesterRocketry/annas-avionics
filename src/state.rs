@@ -170,7 +170,8 @@ impl<'a, I2C: embedded_hal::i2c::I2c> SystemState<'a, I2C> {
         let mut sensor_data = self.sensors.read_all().await;
         let gyro = sensor_data.lsm.map(|lsm| lsm.gyro);
         let accel = sensor_data.merged_accel();
-        let mag = sensor_data.lis3.map(|lis3| lis3.mag);
+        // let mag = sensor_data.lis3.map(|lis3| lis3.mag);
+        let mag = None; // TODO: No magnetometer is implemented yet.
 
         // If there's no gyroscope data, AHRS can't update.
         // TODO: Add a validity flag so the control loop disarms itself

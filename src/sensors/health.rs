@@ -7,9 +7,8 @@ bitflags! {
     /// One bit per physical chip, indicating that the chip is currently faulted.
     pub struct SensorFault: u8 {
         const LSM  = 1 << 0;
-        const LIS3 = 1 << 1;
-        const ADXL = 1 << 2;
-        const BMP  = 1 << 3;
+        const ADXL = 1 << 1;
+        const BMP  = 1 << 2;
     }
 }
 impl_flags!(SensorFault);

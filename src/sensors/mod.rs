@@ -8,14 +8,13 @@
 pub mod adxl375;
 pub mod bmp390;
 pub mod health;
-pub mod lis3mdl;
 pub mod lsm6dsox;
 
 use crate::config::G;
+use crate::config::board::InterruptConfig;
 use crate::sensors::adxl375::AdxlReading;
 use crate::sensors::bmp390::BmpReading;
 use crate::sensors::health::{FaultDebouncer, SensorFault};
-use crate::sensors::lis3mdl::Lis3Reading;
 use crate::sensors::lsm6dsox::LsmReading;
 use crate::utils::errors::{Subsystem, SubsystemError, mark_init_complete, report_init_error};
 use crate::utils::math::{AngularVec3, Vec3};
@@ -26,18 +25,18 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embedded_hal::i2c::I2c;
 use serde::{Deserialize, Serialize};
-use crate::config::board::InterruptConfig;
 
 /// Owns every sensor driver instance sharing the I²C bus, plus the debouncer
 /// deciding when that chip's read failures amount to a fault.
 ///
-/// A driver is `None` when it failed to initialize, just like if it stopped reading.
-/// TODO: add lsm/lis3/bmp fields once their drivers are wired in. Maybe using `embassy_embedded_hal::shared_bus`?
+/// A driver is `None` when it failed to initialize.
 pub struct Sensors<I2C: I2c> {
     adxl: Option<adxl375::Adxl<I2C>>,
     adxl_health: FaultDebouncer, // TODO: Maybe integrate these health values into the actual sensor reading?
     lsm: Option<lsm6dsox::Lsm<I2C>>,
     lsm_health: FaultDebouncer,
+    bmp: Option<bmp390::Bmp<I2C>>,
+    bmp_health: FaultDebouncer,
 }
 
 /// A failure attributable to one chip, which carries the driver's own error so defmt can actually
@@ -46,6 +45,7 @@ pub struct Sensors<I2C: I2c> {
 pub enum SensorError {
     Adxl(adxl375::Error),
     Lsm(lsm6dsox::Error),
+    Bmp(bmp390::Error),
 }
 
 impl SubsystemError for SensorError {
@@ -86,6 +86,17 @@ pub fn init_all<M: RawMutex, BUS: I2c>(interrupt_config: InterruptConfig, mutex:
         }
     };
 
+    let bmp_int = Input::new(interrupt_config.bmp_int, Pull::Down);
+    let bmp_bus = get_bus!(&mutex);
+    let bmp = match bmp390::Bmp::init(bmp_bus, bmp_int) {
+        Ok(driver) => Some(driver),
+        Err(e) => {
+            report_init_error(SensorError::Bmp(e));
+            health::mark_faulted(SensorFault::BMP);
+            None
+        }
+    };
+
     if health::faults().is_empty() {
         mark_init_complete(Subsystem::SENSORS);
     }
@@ -95,21 +106,15 @@ pub fn init_all<M: RawMutex, BUS: I2c>(interrupt_config: InterruptConfig, mutex:
         adxl_health: FaultDebouncer::new(SensorFault::ADXL),
         lsm,
         lsm_health: FaultDebouncer::new(SensorFault::LSM),
+        bmp,
+        bmp_health: FaultDebouncer::new(SensorFault::BMP),
     }
 }
 
 impl<I2C: I2c> Sensors<I2C> {
     /// Read every sensor that is answering. Returns biased + axis-corrected
     /// readings, with `None` for any chip that had nothing to give.
-    ///
-    /// TODO: lis3 and bmp read as absent until their drivers land.
-    /// TODO: Make the sensors return None on stale data.
-    ///   They all expose a data-ready bit (LSM6DSOX `STATUS_REG`, LIS3MDL
-    ///   `STATUS_REG`, BMP390 `STATUS`), and their INT pins are already wired
-    ///   through `InterruptConfig`.
-    ///   Sensors run at different rates, so this is per-sensor, not per-tick.
-    ///   A stale sensor is the same shape as an absent one — `None` for that
-    ///   chip this tick — so it needs no new plumbing downstream.
+    /// TODO: Figure out how to handle different sensor speeds. Probably interrupts + queue, but unsure.
     pub async fn read_all(&mut self) -> SensorReadings {
         let adxl = match self.adxl.as_mut() {
             Some(adxl) => self
@@ -123,10 +128,16 @@ impl<I2C: I2c> Sensors<I2C> {
                 .record(lsm.read().await.map_err(SensorError::Lsm)),
             None => None,
         };
+        let bmp = match self.bmp.as_mut() {
+            Some(bmp) => self
+                .bmp_health
+                .record(bmp.read().await.map_err(SensorError::Bmp)),
+            None => None,
+        };
         SensorReadings {
             adxl,
             lsm,
-            ..Default::default()
+            bmp,
         }
     }
 }
@@ -176,10 +187,8 @@ pub trait AltitudeReading {
 #[derive(Default, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, defmt::Format)]
 pub struct SensorReadings {
     pub lsm: Option<LsmReading>,
-    pub lis3: Option<Lis3Reading>,
     pub adxl: Option<AdxlReading>,
     pub bmp: Option<BmpReading>,
-    launched: bool,
 }
 
 impl SensorReadings {
@@ -199,10 +208,8 @@ impl SensorReadings {
 
     /// True if an accelerometer has recorded a launch-magnitude acceleration spike.
     pub fn has_launched(&mut self) -> bool {
-        if !self.launched && self.check_launch_accel() {
-            self.launched = true;
-        }
-        self.launched
+        // TODO: Make this more robust, like latching and requiring a minimum duration.
+        self.check_launch_accel()
     }
 
     fn check_launch_accel(&self) -> bool {

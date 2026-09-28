@@ -1,4 +1,4 @@
-use bmp390::ConfigurationBuilder;
+use bmp390::{Bmp390, ConfigurationBuilder};
 use bmp390::interfaces::{I2cInterface, Polling};
 use bmp390::registers::*;
 use defmt::info;
@@ -39,11 +39,11 @@ pub enum Error {
     Read,
 }
 
-pub struct Bmp390<I2C: I2c> {
+pub struct Bmp<I2C: I2c> {
     driver: bmp390::Bmp390<Polling<I2cInterface<I2C>, Delay>>,
 }
 
-impl<I2C: I2c> Sensor for Bmp390<I2C> {
+impl<I2C: I2c> Sensor for Bmp<I2C> {
     type Bus = I2C;
     type Reading = BmpReading;
     type Error = Error;
@@ -63,8 +63,8 @@ impl<I2C: I2c> Sensor for Bmp390<I2C> {
     }
 }
 
-impl<I2C: I2c> Bmp390<I2C> {
-    pub async fn init(i2c: I2C, int_pin: Input<'static>) -> Result<Self, Error>
+impl<I2C: I2c> Bmp<I2C> {
+    pub fn init(i2c: I2C, int_pin: Input<'static>) -> Result<Self, Error>
         where
             Self: Sized
     {
@@ -75,7 +75,7 @@ impl<I2C: I2c> Bmp390<I2C> {
             },
             delay: Delay,
         };
-        let mut driver = bmp390::Bmp390::new(interface);
+        let mut driver = Bmp390::new(interface);
         let chip_id = driver.device().chip_id().read().map_err(|_| Error::Init)?;
         info!("Chip ID: {:#04X}", chip_id.value());
         let rev_id = driver.device().rev_id().read().map_err(|_| Error::Init)?;

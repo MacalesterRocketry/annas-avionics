@@ -20,7 +20,7 @@ pub const HAS_DROGUE_CHUTE: bool = true;
 pub const G: f64 = 9.805_79;
 
 // Magnetometer hard-iron offsets (µT). Calibrate per-flight.
-pub const LIS3_BIAS: AngularVec3 = AngularVec3 {
+pub const LIS3_BIAS: AngularVec3 = AngularVec3 { // TODO: handle for whatever magnetometer we use
     pitch: -35.63,
     yaw: 19.96,
     roll: -33.43
@@ -176,7 +176,7 @@ pub mod board {
             adxl_int2: PIN_8,
             lsm_int1: PIN_9,
             lsm_int2: PIN_10,
-            lis3_int1: PIN_11,
+            lis3_int1: PIN_11, // TODO: figure out once we know what magnetometer we're using
             lis3_int2: PIN_12,
             bmp_int: PIN_13,
         },
