@@ -26,6 +26,7 @@
 //!  where -y is what we want Z to be.
 use accelerometer::Accelerometer;
 use defmt::*;
+use embassy_rp::gpio::Input;
 use embassy_time::Delay;
 use embedded_hal::i2c::I2c;
 use lsm6dsox::*;
@@ -41,7 +42,7 @@ pub struct LsmReading {
     /// Body-frame angular rate (rad/s), bias-subtracted.
     pub gyro: AngularVec3,
     /// Die temperature (°C).
-    pub temperature: f64,
+    pub temperature: f32,
 }
 
 impl AccelerometerReading for LsmReading {
@@ -54,7 +55,7 @@ impl GyroscopeReading for LsmReading {
     }
 }
 impl TemperatureReading for LsmReading {
-    fn temperature(&self) -> f64 {
+    fn temperature(&self) -> f32 {
         self.temperature
     }
 }
@@ -133,10 +134,7 @@ trait LsmResultExt<T> {
 }
 
 // Blanket implementation for any Result that has an error convertable to LsmError
-impl<T, E> LsmResultExt<T> for Result<T, E>
-where
-    E: Into<LsmError>,
-{
+impl<T, E: Into<LsmError>> LsmResultExt<T> for Result<T, E> {
     fn init_err(self) -> Result<T, Error> {
         self.map_err(|e| Error::Init(e.into()))
     }
@@ -154,7 +152,24 @@ impl<I2C: I2c> Sensor for Lsm<I2C> {
     type Reading = LsmReading;
     type Error = Error;
 
-    fn init(i2c: I2C) -> Result<Self, Error> {
+    /// Read XYZ, bias-corrected to m/s².
+    async fn read(&mut self) -> Result<LsmReading, Error> {
+        let raw_accel: Vec3 = self.driver.accel_norm().read_err()?.into();
+        // The sensor is mounted in a different orientation than we want, so we need to transform the axes.
+        let transformed_accel = transform_sensor_axes(raw_accel * G);
+        let temperature = self.driver.temperature().read_err()?;
+        let gyro: AngularVec3 = self.driver.angular_rate().read_err()?.into();
+        // TODO: return None if it hasn't yet updated (DATA_READY register)
+        Ok(LsmReading {
+            accel: transformed_accel - LSM_ACCEL_BIAS,
+            gyro: gyro - LSM_GYRO_BIAS,
+            temperature: temperature.as_celsius() as f32,
+        })
+    }
+}
+
+impl<I2C: I2c> Lsm<I2C> {
+    pub fn init(i2c: I2C, int_pin1: Input<'static>, int_pin2: Input<'static>) -> Result<Self, Error> {
         // TODO: Figure out what address I actually need to use
         let mut driver = Lsm6dsox::new(i2c, SlaveAddress::Low, Delay);
 
@@ -169,18 +184,4 @@ impl<I2C: I2c> Sensor for Lsm<I2C> {
         Ok(Self { driver })
     }
 
-    /// Read XYZ, bias-corrected to m/s².
-    fn read(&mut self) -> Result<LsmReading, Error> {
-        let raw_accel: Vec3 = self.driver.accel_norm().read_err()?.into();
-        // The sensor is mounted in a different orientation than we want, so we need to transform the axes.
-        let transformed_accel = transform_sensor_axes(raw_accel * G);
-        let temperature = self.driver.temperature().read_err()?;
-        let gyro: AngularVec3 = self.driver.angular_rate().read_err()?.into();
-        // TODO: return None if it hasn't yet updated (DATA_READY register)
-        Ok(LsmReading {
-            accel: transformed_accel - LSM_ACCEL_BIAS,
-            gyro: gyro - LSM_GYRO_BIAS,
-            temperature: temperature.as_celsius(),
-        })
-    }
 }

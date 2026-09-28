@@ -84,7 +84,7 @@ heapless = { version = "0.9", features = ["defmt"] }
 # TODO: Consider adding a KX134 for an accelerometer with 64G range and better precision than the ADXL375. Maybe have all three?
 lsm6dsox  = "2.1" # gyro + low-G accel
 mmc5983_rs = "0.0.1" # magnetometer
-bmp390-rs = "0.4" # barometer and temperature sensor
+bmp390 = { version = "0.5.0-alpha.1", features = ["default", "defmt", "embassy-time", "sync"]} # barometer
 adxl3xx   = "0.2" # high-G accelerometer (ADXL375)
 
 measurements = { version = "0.11", default-features = false, features = ["serde"] }

@@ -12,6 +12,7 @@
 //!   once the low-G accel saturates, and that path is not.
 
 use adxl3xx::{Adxl375 as Adxl3xxDriver, AdxlBusI2c};
+use embassy_rp::gpio::Input;
 use embedded_hal::i2c::I2c;
 use serde::{Deserialize, Serialize};
 use crate::config::{G, ADXL_BIAS};
@@ -41,6 +42,8 @@ pub enum Error {
 
 pub struct Adxl<I2C: I2c> {
     driver: Adxl3xxDriver<AdxlBusI2c<I2C>>,
+    int1: Input<'static>,
+    int2: Input<'static>,
 }
 
 impl<I2C: I2c> Sensor for Adxl<I2C> {
@@ -48,12 +51,25 @@ impl<I2C: I2c> Sensor for Adxl<I2C> {
     type Reading = AdxlReading;
     type Error = Error;
 
+    /// Read XYZ, bias-corrected to m/s².
+    async fn read(&mut self) -> Result<AdxlReading, Error> {
+        self.int1.wait_for_rising_edge().await; // TODO: Decide if we want this.
+        let raw: Vec3 = self.driver.read_axis().map_err(|_| Error::Read)?.into();
+        // The sensor is mounted in a different orientation than we want, so we need to transform the axes.
+        let transformed = transform_sensor_axes(raw * G);
+        Ok(AdxlReading { // TODO: Decide if I want to have optional returns or async returns. Leaning toward the latter, but unsure. Will need work either way.
+            accel: transformed - ADXL_BIAS,
+        })
+    }
+}
+
+impl<I2C: I2c> Adxl<I2C> {
     /// Bring up the high-G accelerometer: validate device ID, reset to
     /// datasheet defaults (800 Hz, FIFO stream), and run axis-offset
     /// calibration. Mirrors `initHighGAccelerometer()` in the C++ source,
     /// minus the activity-interrupt wiring — launch detection currently
     /// polls magnitude instead (see `SensorReadings::has_launched`).
-    fn init(i2c: I2C) -> Result<Self, Error> where Self: Sized {
+    pub(crate) fn init(i2c: I2C, int_pin1: Input<'static>, int_pin2: Input<'static>) -> Result<Self, Error> where Self: Sized {
         let bus = AdxlBusI2c { i2c, addr: adxl3xx::reg::ADXL_ADDR };
         let mut driver = Adxl3xxDriver::new(bus).map_err(|_| Error::Init)?;
 
@@ -62,17 +78,10 @@ impl<I2C: I2c> Sensor for Adxl<I2C> {
         // driver.calibrate_axis_offsets().map_err(|_| Error::Calibration)?;
         // TODO: set up DATA_READY interrupt
 
-        Ok(Self { driver })
-    }
-
-    /// Read XYZ, bias-corrected to m/s².
-    fn read(&mut self) -> Result<AdxlReading, Error> {
-        let raw: Vec3 = self.driver.read_axis().map_err(|_| Error::Read)?.into();
-        // The sensor is mounted in a different orientation than we want, so we need to transform the axes.
-        let transformed = transform_sensor_axes(raw * G);
-        // TODO: return None if it hasn't yet updated (DATA_READY register)
-        Ok(AdxlReading {
-            accel: transformed - ADXL_BIAS,
+        Ok(Self {
+            driver,
+            int1: int_pin1,
+            int2: int_pin2,
         })
     }
 }

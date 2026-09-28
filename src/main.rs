@@ -49,11 +49,11 @@ static mut CORE1_STACK: Stack<4096> = Stack::new();
 
 // Bind the interrupt handler with the peripheral
 bind_interrupts!(struct Irqs {
-    I2C0_IRQ => i2c::InterruptHandler<I2C0>; // I2C for sensors
     PIO0_IRQ_0 => pio::InterruptHandler<PIO0>; // PIO for NeoPixels
     DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>; // DMA for NeoPixels
     UART0_IRQ => uart::BufferedInterruptHandler<UART0>; // UART for GPS
 }); // TODO: Extract these types to config.rs
+// TODO: Add interrupt handlers for the sensors
 
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
@@ -61,7 +61,7 @@ static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
 pub static FLIGHT_STATE: Watch<CriticalSectionRawMutex, FlightState, 2> = Watch::new();
 
 // TODO: Move this I2C0 out into a type variable
-pub static I2C_BUS_CELL: StaticCell<Mutex<NoopRawMutex, RefCell<i2c::I2c<I2C0, i2c::Async>>>> = StaticCell::new();
+pub static I2C_BUS_CELL: StaticCell<Mutex<NoopRawMutex, RefCell<i2c::I2c<I2C0, i2c::Blocking>>>> = StaticCell::new();
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) -> ! {
@@ -116,7 +116,7 @@ async fn core0_main(
     info!("core 0: avionics task starting");
 
     embassy_futures::join::join(
-        system_loop(i2c_config, peripheral_config),
+        system_loop(i2c_config, peripheral_config, interrupt_config),
         control_loop(servos_config),
     ).await;
 }

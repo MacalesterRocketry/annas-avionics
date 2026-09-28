@@ -21,10 +21,12 @@ use crate::utils::errors::{Subsystem, SubsystemError, mark_init_complete, report
 use crate::utils::math::{AngularVec3, Vec3};
 use core::cell::RefCell;
 use embassy_embedded_hal::shared_bus::blocking::i2c::I2cDevice;
+use embassy_rp::gpio::{Input, Pull};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embedded_hal::i2c::I2c;
 use serde::{Deserialize, Serialize};
+use crate::config::board::InterruptConfig;
 
 /// Owns every sensor driver instance sharing the I²C bus, plus the debouncer
 /// deciding when that chip's read failures amount to a fault.
@@ -54,15 +56,17 @@ impl SubsystemError for SensorError {
 
 /// Attempt to initialize every sensor on the shared I²C bus. Errors are marked individually,
 /// but the overall sensor system can still be used even if some chips aren't working.
-pub fn init_all<M: RawMutex, BUS: I2c>(mutex: &'static Mutex<M, RefCell<BUS>>) -> Sensors<I2cDevice<'static, M, BUS>> {
+pub fn init_all<M: RawMutex, BUS: I2c>(interrupt_config: InterruptConfig, mutex: &'static Mutex<M, RefCell<BUS>>) -> Sensors<I2cDevice<'static, M, BUS>> {
     macro_rules! get_bus {
         ($mutex:expr) => {
             embassy_embedded_hal::shared_bus::blocking::i2c::I2cDevice::new($mutex)
         };
     }
 
+    let adxl_int1 = Input::new(interrupt_config.adxl_int1, Pull::Down);
+    let adxl_int2 = Input::new(interrupt_config.adxl_int2, Pull::Down);
     let adxl_bus = get_bus!(&mutex);
-    let adxl = match adxl375::Adxl::init(adxl_bus) {
+    let adxl = match adxl375::Adxl::init(adxl_bus, adxl_int1, adxl_int2) {
         Ok(driver) => Some(driver),
         Err(e) => {
             report_init_error(SensorError::Adxl(e));
@@ -70,8 +74,10 @@ pub fn init_all<M: RawMutex, BUS: I2c>(mutex: &'static Mutex<M, RefCell<BUS>>) -
             None
         }
     };
+    let lsm_int1 = Input::new(interrupt_config.lsm_int1, Pull::Down);
+    let lsm_int2 = Input::new(interrupt_config.lsm_int2, Pull::Down);
     let lsm_bus = get_bus!(&mutex);
-    let lsm = match lsm6dsox::Lsm::init(lsm_bus) {
+    let lsm = match lsm6dsox::Lsm::init(lsm_bus, lsm_int1, lsm_int2) {
         Ok(driver) => Some(driver),
         Err(e) => {
             report_init_error(SensorError::Lsm(e));
@@ -108,13 +114,13 @@ impl<I2C: I2c> Sensors<I2C> {
         let adxl = match self.adxl.as_mut() {
             Some(adxl) => self
                 .adxl_health
-                .record(adxl.read().map_err(SensorError::Adxl)),
+                .record(adxl.read().await.map_err(SensorError::Adxl)),
             None => None,
         };
         let lsm = match self.lsm.as_mut() {
             Some(lsm) => self
                 .lsm_health
-                .record(lsm.read().map_err(SensorError::Lsm)),
+                .record(lsm.read().await.map_err(SensorError::Lsm)),
             None => None,
         };
         SensorReadings {
@@ -130,11 +136,9 @@ pub trait Sensor {
     type Reading;
     type Error;
 
-    /// Initialize the sensor with the given I2C bus.
-    fn init(i2c: Self::Bus) -> Result<Self, Self::Error> where Self: Sized;
     /// Read the sensor, returning a bias-corrected reading in the body frame, generally in SI units.
     /// Returns `None` if the chip is not responding or has no new data.
-    fn read(&mut self) -> Result<Self::Reading, Self::Error> where Self: Sized;
+    async fn read(&mut self) -> Result<Self::Reading, Self::Error> where Self: Sized;
 }
 
 pub trait AccelerometerReading {
@@ -155,15 +159,15 @@ pub trait MagnetometerReading {
 }
 pub trait TemperatureReading {
     /// Return the die temperature or outside temperature (°C).
-    fn temperature(&self) -> f64;
+    fn temperature(&self) -> f32;
 }
 pub trait PressureReading {
     /// Return the barometric pressure (Pa).
-    fn pressure(&self) -> f64;
+    fn pressure(&self) -> f32;
 }
 pub trait AltitudeReading {
     /// Return the barometric altitude (m).
-    fn altitude(&self) -> f64;
+    fn altitude(&self) -> f32;
 }
 
 /// One tick's worth of sensor data. A `None` field is a chip that didn't return any data
