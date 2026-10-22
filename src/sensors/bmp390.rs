@@ -2,9 +2,9 @@ use bmp390::{Bmp390, ConfigurationBuilder};
 use bmp390::interfaces::{I2cInterface, Polling};
 use bmp390::registers::*;
 use defmt::info;
-use crate::sensors::{AltitudeReading, PressureReading, Sensor, TemperatureReading};
+use crate::sensors::{AltitudeReading, PressureReading, Sensor, TemperatureReading, TimedSample};
 use embassy_rp::gpio::Input;
-use embassy_time::Delay;
+use embassy_time::{Delay, Instant};
 use embedded_hal::i2c::I2c;
 use serde::{Deserialize, Serialize};
 
@@ -48,17 +48,17 @@ impl<I2C: I2c> Sensor for Bmp<I2C> {
     type Reading = BmpReading;
     type Error = Error;
 
-    async fn read(&mut self) -> Result<Self::Reading, Self::Error>
-        where
-            Self: Sized
-    {
+    async fn read(&mut self) -> Result<TimedSample<Self::Reading>, Self::Error> {
         let measurement = self.driver.measure().map_err(|_| Error::Read)?; // TODO: handle error better
         // TODO: wait for interrupt
-        Ok(BmpReading {
-            // TODO: use uom throughout everything
-            pressure: measurement.pressure.get::<uom::si::pressure::pascal>(),
-            temperature: measurement.temperature.get::<uom::si::thermodynamic_temperature::degree_celsius>(),
-            altitude: measurement.altitude.get::<uom::si::length::meter>(),
+        Ok(TimedSample {
+            value: BmpReading {
+                // TODO: use uom throughout everything
+                pressure: measurement.pressure.get::<uom::si::pressure::pascal>(),
+                temperature: measurement.temperature.get::<uom::si::thermodynamic_temperature::degree_celsius>(),
+                altitude: measurement.altitude.get::<uom::si::length::meter>(),
+            },
+            sampled_at: Instant::now(),
         })
     }
 }

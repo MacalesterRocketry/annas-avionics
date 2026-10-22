@@ -50,6 +50,8 @@ pub enum SdError {
     /// Every log filename permitted by FAT 8.3 (`LOG0.BIN`..`LOG99999.BIN`) is
     /// taken, so there is nowhere left to write.
     LogDirFull,
+    /// The SD card channel is full and cannot accept new log packets.
+    LogChannelFull,
 }
 
 impl From<embedded_sdmmc::Error<SdCardError>> for SdError {
@@ -74,7 +76,7 @@ impl SubsystemError for SdError {
 pub enum LogEntry {
     GPS(crate::navigation::gps::GpsState),
     State(crate::state::FlightState),
-    Sensors(crate::sensors::SensorReadings),
+    // Sensors(crate::sensors::SensorReadings),
     AHRS(crate::navigation::ahrs::AhrsState),
     Control(crate::state::ControlSetpoint),
     // TODO: Add some way to note PID, fin, and servo outputs (desired angular acceleration, desired deflection angle, and actual deflection angle).
@@ -86,14 +88,20 @@ pub struct LogPacket {
     pub entry: LogEntry,
 }
 
-pub async fn log_packet(entry: LogEntry) {
+pub fn log_packet(entry: LogEntry) {
     let packet = LogPacket {
         timestamp_us: Instant::now().as_micros(),
         entry,
     };
-    SD_LOGGING_CHANNEL.sender().send(packet).await
-    // TODO: This blocks until the SD loop can write it.
-    //  Figure out if we want that. I'm guessing not (dropping packets is better than blocking the hot loop), but we need to figure out how to handle that.
+    match SD_LOGGING_CHANNEL.sender().try_send(packet) {
+        Ok(_) => {}
+        Err(_) => {
+            SD_LOGGING_CHANNEL.sender().clear();
+            // TODO: Maybe just clear the sensor values, not the system logs, and then clear the system logs if it's still full. System logs are more important.
+            report_runtime_error(SdError::LogChannelFull); // TODO: Make sure this logs somehow to the SD.
+        }
+    }
+    // TODO: Handle full channel. Maybe delete some packets? But should definitely mark that that's happened.
 }
 
 struct SDTimeSource {

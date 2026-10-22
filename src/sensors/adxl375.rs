@@ -13,10 +13,11 @@
 
 use adxl3xx::{Adxl375 as Adxl3xxDriver, AdxlBusI2c};
 use embassy_rp::gpio::Input;
+use embassy_time::Instant;
 use embedded_hal::i2c::I2c;
 use serde::{Deserialize, Serialize};
 use crate::config::{G, ADXL_BIAS};
-use crate::sensors::{transform_sensor_axes, Sensor, AccelerometerReading};
+use crate::sensors::{transform_sensor_axes, Sensor, AccelerometerReading, TimedSample};
 use crate::utils::math::Vec3;
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, defmt::Format)]
@@ -52,13 +53,16 @@ impl<I2C: I2c> Sensor for Adxl<I2C> {
     type Error = Error;
 
     /// Read XYZ, bias-corrected to m/s².
-    async fn read(&mut self) -> Result<AdxlReading, Error> {
-        self.int1.wait_for_rising_edge().await; // TODO: Decide if we want this.
+    async fn read(&mut self) -> Result<TimedSample<Self::Reading>, Self::Error> {
+        self.int1.wait_for_high().await; // TODO: Decide if we want this.
         let raw: Vec3 = self.driver.read_axis().map_err(|_| Error::Read)?.into();
         // The sensor is mounted in a different orientation than we want, so we need to transform the axes.
         let transformed = transform_sensor_axes(raw * G);
-        Ok(AdxlReading { // TODO: Decide if I want to have optional returns or async returns. Leaning toward the latter, but unsure. Will need work either way.
-            accel: transformed - ADXL_BIAS,
+        Ok(TimedSample {
+            value: AdxlReading { // TODO: Decide if I want to have optional returns or async returns. Leaning toward the latter, but unsure. Will need work either way.
+                accel: transformed - ADXL_BIAS,
+            },
+            sampled_at: Instant::now(),
         })
     }
 }

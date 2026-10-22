@@ -127,7 +127,7 @@ pub async fn indicator_loop(
     }
 }
 
-fn init_indicators(indicators_config: IndicatorsConfig) -> Result<(Output<'static>, Neopixel, Receiver<'static, CriticalSectionRawMutex, FlightState, 2>), IndicationError> {
+fn init_indicators(indicators_config: IndicatorsConfig) -> Result<(Output<'static>, Neopixel, Receiver<'static, CriticalSectionRawMutex, FlightState, 3>), IndicationError> {
     info!("initializing buzzer");
     let mut buzzer = Output::new(indicators_config.buzzer, embassy_rp::gpio::Level::Low);
     buzzer.set_low();

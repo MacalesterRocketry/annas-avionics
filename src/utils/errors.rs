@@ -6,6 +6,7 @@ bitflags! {
         const BASE_SYSTEM = 1 << 0; // core 0
         const SENSORS     = 1 << 1;
         const CONTROL     = 1 << 2;
+        const AHRS        = 1 << 3;
 
         const INDICATORS  = 1 << 5; // core 1
         const SD_CARD     = 1 << 6;

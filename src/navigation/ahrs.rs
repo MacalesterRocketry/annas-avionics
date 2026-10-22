@@ -1,19 +1,35 @@
 // TODO: These are all pure functions, so this is all unit testable without even needing to run on the board.
 //  Figure out a way to do that.
 
+use core::cmp::PartialEq;
 use crate::utils::{serialize_instant, deserialize_instant};
 use crate::config::{AHRS_ACC_BETA, AHRS_MAG_BETA, G, GYRO_LPF_HZ};
 use crate::utils::duration_to_seconds;
 use crate::utils::math::{AngularVec3, Grad4, Quat, Vec3, axis_angle_rad_to_quat};
 use core::f64::consts::PI;
+use defmt::{Format, Formatter};
+use embassy_futures::select::{select, Either};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::watch::Watch;
-use embassy_time::{Duration, Instant};
+use embassy_time::{Duration, Instant, Timer};
+use embedded_hal::i2c::I2c;
 use libm::sqrt;
 use serde::{Deserialize, Serialize};
+use crate::FLIGHT_STATE;
+use crate::sensors::lsm6dsox::{Error, LsmError};
+use crate::sensors::{health, Sensor, SensorError};
+use crate::sensors::health::SensorFault;
+use crate::state::{FlightState, GroundSubState};
+use crate::utils::errors::{report_init_error, SubsystemError, Subsystem};
 
 /// Latest AHRS solution, published once per sensor sample.
 pub static AHRS_STATE: Watch<CriticalSectionRawMutex, AhrsState, 2> = Watch::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, defmt::Format)]
+pub enum AhrsMode {
+    Ground,
+    Flight,
+}
 
 /// Mutable AHRS runtime state. Owned by the sensor task, which calls
 /// [`update`](AhrsState::update) each sample and publishes the result to
@@ -32,7 +48,7 @@ pub struct AhrsState {
     /// [`angular_velocity_body`](Self::angular_velocity_body) low-passed at
     /// [`GYRO_LPF_HZ`]. Use this for control; the raw field is for logging.
     pub angular_velocity_filtered: AngularVec3,
-    in_flight: bool,
+    pub mode: AhrsMode,
     // TODO: Add some sort of validity flag here to disable the control system if we don't have good gyro or AHRS hasn't settled?
 }
 
@@ -46,7 +62,7 @@ impl Default for AhrsState {
             position_earth: Vec3::ZERO,
             angular_velocity_body: AngularVec3::ZERO,
             angular_velocity_filtered: AngularVec3::ZERO,
-            in_flight: false,
+            mode: AhrsMode::Ground,
         }
     }
 }
@@ -74,7 +90,10 @@ impl AhrsState {
 
         // Step 4: Madgwick sensor fusion correction (q3) - fuse with accelerometer and magnetometer
         // In flight, we just follow the gyroscope. Gravity doesn't affect it, so we need to ignore the accelerometer, and the magnetometer is unreliable.
-        let q3 = if self.in_flight { q2 } else { madgwick_correction_step(q2, accel, mag, dt) };
+        let q3 = match self.mode {
+            AhrsMode::Ground => q2,
+            AhrsMode::Flight => madgwick_correction_step(q2, accel, mag, dt),
+        };
 
         // Step 5: Final normalization (q4) - ensure valid quaternion
         let q4 = q3.normalized();
@@ -133,12 +152,9 @@ impl AhrsState {
         // #endif
     }
 
-    pub const fn launch(&mut self) {
-        self.in_flight = true;
-    }
-
-    pub const fn landing(&mut self) {
-        self.in_flight = false;
+    // TODO: Should this be a fn or just direct property access?
+    pub const fn set_mode(&mut self, mode: AhrsMode) {
+        self.mode = mode;
     }
 
     pub const fn zero_pos_vel(&mut self) {
@@ -314,4 +330,63 @@ pub fn rotate_earth_to_body(q: Quat, v_e: Vec3) -> Vec3 {
     // p = q* ⊗ [0,v_e] ⊗ q
     let res = q.conjugate() * v_e.to_quat(0.0) * q;
     Vec3{ x: res.x, y: res.y, z: res.z } // last 3 are vector part
+}
+
+#[derive(Debug, defmt::Format)]
+pub enum AhrsError {
+    NoFlightStateReceiver,
+}
+
+impl SubsystemError for AhrsError {
+    fn subsystem(&self) -> Subsystem {
+        Subsystem::AHRS
+    }
+}
+
+pub async fn ahrs_loop<I2C: I2c>(mut lsm: crate::sensors::lsm6dsox::Lsm<I2C>) {
+    const MAX_DRDY_GAP: Duration = Duration::from_millis(20);
+    let mut ahrs = AhrsState::default();
+    AHRS_STATE.sender().send(ahrs);
+    
+    let Some(mut flight_state_rx) = FLIGHT_STATE.receiver() else {
+        report_init_error(AhrsError::NoFlightStateReceiver);
+        return;
+    };
+
+    // TODO: Add a validity flag so the control loop disarms itself
+    loop {
+        let data = match select(
+            lsm.wait_for_interrupt(),
+            Timer::after(MAX_DRDY_GAP),
+        ).await {
+            Either::First(Ok(())) => {
+                let flight_state = flight_state_rx.try_get().unwrap_or(FlightState::PreLaunch(GroundSubState::Startup));
+                ahrs.set_mode(flight_state.ahrs_mode());
+                
+                // Read/drain FIFO, publish AHRS, mark healthy.
+                let data = lsm.read();
+                match data {
+                    Ok(sample) => {
+                        ahrs.update(sample.value.gyro, Some(sample.value.accel), None, sample.sampled_at);
+                        AHRS_STATE.sender().send(ahrs);
+                        data
+                    }
+                    Err(e) => {
+                        report_init_error(SensorError::Lsm(e));
+                        health::mark_faulted(SensorFault::LSM);
+                        Err(Error::Read(LsmError::NoDataReady))
+                    }
+                }
+            }
+            Either::Second(()) => {
+                // Mark interrupt/sample path stale; probe sensor status/recover.
+                // TODO: mark stale
+                lsm.read()
+            }
+            Either::First(Err(_)) => {
+                // Treat as an input-path failure.
+                Err(Error::Read(LsmError::NoDataReady))
+            }
+        };
+    }
 }

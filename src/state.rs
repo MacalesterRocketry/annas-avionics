@@ -8,7 +8,7 @@
 use crate::communication::indication::{BeepCycle, LedColor, StateIndicator};
 use crate::config::HAS_DROGUE_CHUTE;
 use crate::config::board::{I2cConfig, InterruptConfig, PeripheralConfig};
-use crate::navigation::ahrs::{AHRS_STATE, AhrsState};
+use crate::navigation::ahrs::{AhrsMode, AhrsState, AHRS_STATE};
 use crate::navigation::gps::{GPS_STATE, GpsState};
 use crate::sensors::Sensors;
 use crate::utils::errors::{Subsystem, SubsystemError, is_init_settled, mark_init_complete, report_init_error};
@@ -23,27 +23,11 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::watch::{Receiver, Watch};
 use embassy_time::{Duration, Instant, Ticker};
 use serde::{Deserialize, Serialize};
-
-/// What the control loop should be doing. The state machine owns the mission
-/// timeline, so it decides the attitude to hold; the control loop only knows how
-/// to get there. Publishing an absolute attitude rather than a roll offset keeps
-/// the ignition-time reference on this side and generalizes to 3-axis unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, defmt::Format)]
-pub enum ControlSetpoint {
-    /// Fins centered, PID held in reset.
-    Disarmed,
-    /// Drive the airframe to this absolute attitude.
-    Attitude(Quat),
-}
-
-/// Latest control setpoint. A `Watch` because the control loop wants whatever is
-/// current when its own ticker fires — a queue would let setpoints pile up and
-/// be actuated late.
-pub static CONTROL_SETPOINT: Watch<CriticalSectionRawMutex, ControlSetpoint, 2> = Watch::new();
+pub(crate) use crate::control::{disarm_control, set_control_setpoint, ControlSetpoint, arm_control};
 
 pub struct SystemState<'a, I2C: embedded_hal::i2c::I2c> {
-    pub state: Receiver<'a, CriticalSectionRawMutex, FlightState, 2>,
-    pub ahrs: AhrsState,
+    pub state: Receiver<'a, CriticalSectionRawMutex, FlightState, 3>,
+    pub ahrs: Receiver<'a, CriticalSectionRawMutex, AhrsState, 2>,
     pub gps: Receiver<'a, CriticalSectionRawMutex, GpsState, 3>,
     pub sensors: Sensors<I2C>,
     pub(crate) ignition_time: Option<Instant>,
@@ -54,7 +38,8 @@ pub struct SystemState<'a, I2C: embedded_hal::i2c::I2c> {
 pub enum FlightState {
     PreLaunch(GroundSubState),
     Ascent(AscentSubState),
-    Recovery(RecoverySubState),
+    Descent(DescentSubState),
+    Landed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, defmt::Format)]
@@ -76,10 +61,9 @@ pub enum AscentSubState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, defmt::Format)]
-pub enum RecoverySubState {
+pub enum DescentSubState {
     DrogueDeploy,
     MainDeploy,
-    Landed,
 }
 
 fn standard_beep_cycle<'a>(count: u32, cycle_secs: u64) -> BeepCycle<'a> {
@@ -114,7 +98,11 @@ impl FlightState {
                 led: LedColor::Purple,
                 buzzer: BeepCycle::Silent,
             },
-            FlightState::Recovery(RecoverySubState::Landed) => StateIndicator {
+            FlightState::Descent(_) => StateIndicator {
+                led: LedColor::Cyan,
+                buzzer: BeepCycle::Silent,
+            },
+            FlightState::Landed => StateIndicator {
                 led: LedColor::Cyan,
                 buzzer: BeepCycle::Silent,
             },
@@ -122,6 +110,15 @@ impl FlightState {
                 led: LedColor::Off,
                 buzzer: BeepCycle::Silent,
             },
+        }
+    }
+
+    pub fn ahrs_mode(&self) -> AhrsMode {
+        match self {
+            FlightState::PreLaunch(_) | FlightState::Landed => {
+                AhrsMode::Ground
+            }
+            FlightState::Ascent(_) | FlightState::Descent(_) => AhrsMode::Flight,
         }
     }
 }
@@ -133,6 +130,8 @@ pub enum StateError {
     NoFlightStateReceiver,
     /// Too many `GPS_STATE` receivers are in use, so another can't be created.
     NoGpsReceiver,
+    /// Too many `AHRS_STATE` receivers are in use, so another can't be created.
+    NoAhrsReceiver,
 }
 
 impl SubsystemError for StateError {
@@ -150,10 +149,13 @@ impl<'a, I2C: embedded_hal::i2c::I2c> SystemState<'a, I2C> {
         let Some(gps) = GPS_STATE.receiver() else {
             return Err(StateError::NoGpsReceiver);
         };
+        let Some(ahrs) = AHRS_STATE.receiver() else {
+            return Err(StateError::NoAhrsReceiver);
+        };
         Ok(Self {
             state,
-            ahrs: AhrsState::default(),
             gps,
+            ahrs,
             sensors,
             ignition_time: None,
             launch_orientation: Quat::IDENTITY,
@@ -167,19 +169,6 @@ impl<'a, I2C: embedded_hal::i2c::I2c> SystemState<'a, I2C> {
         let tick_time = now - self.last_tick;
         self.last_tick = now;
 
-        let mut sensor_data = self.sensors.read_all().await;
-        let gyro = sensor_data.lsm.map(|lsm| lsm.gyro);
-        let accel = sensor_data.merged_accel();
-        // let mag = sensor_data.lis3.map(|lis3| lis3.mag);
-        let mag = None; // TODO: No magnetometer is implemented yet.
-
-        // If there's no gyroscope data, AHRS can't update.
-        // TODO: Add a validity flag so the control loop disarms itself
-        if let Some(gyro) = gyro {
-            self.ahrs.update(gyro, accel, mag, now);
-            AHRS_STATE.sender().send(self.ahrs);
-        }
-
         let state = self.state.try_get();
         if state.is_none() {
             error!("Flight state not set; defaulting to PreLaunch(Startup)");
@@ -189,7 +178,7 @@ impl<'a, I2C: embedded_hal::i2c::I2c> SystemState<'a, I2C> {
         match state.unwrap_or(FlightState::PreLaunch(GroundSubState::Startup)) {
             // Everything that occurs on the ground prior to launch.
             FlightState::PreLaunch(sub) => {
-                CONTROL_SETPOINT.sender().send(ControlSetpoint::Disarmed);
+                set_control_setpoint(ControlSetpoint::Neutral);
                 match sub {
                 GroundSubState::Startup => {
                     if is_init_settled() { // TODO: AHRS should probably signal if it's ready too
@@ -197,7 +186,7 @@ impl<'a, I2C: embedded_hal::i2c::I2c> SystemState<'a, I2C> {
                     }
                 }
                 GroundSubState::ReadyToLaunch(gps_state) => {
-                    if sensor_data.has_launched() {
+                    if self.ahrs.try_get().has_launched() {
                         self.transition_to(FlightState::Ascent(AscentSubState::Burn));
                     }
                     let has_fix = match self.gps.try_get() {
@@ -221,40 +210,44 @@ impl<'a, I2C: embedded_hal::i2c::I2c> SystemState<'a, I2C> {
 
             FlightState::Ascent(sub) => {
                 if self.ignition_time.is_none() { // shouldn't ever happen because of our transition function, but just in case
-                    self.ignition_time = Some(now);
+                    self.handle_ignition();
                 }
                 let time_since_ignition = now - self.ignition_time.unwrap_or(now);
-                CONTROL_SETPOINT.sender().send(ControlSetpoint::Attitude(
+                set_control_setpoint(ControlSetpoint::Attitude(
                     attitude_target(self.launch_orientation, roll_program(time_since_ignition)),
                 ));
+                let ahrs_opt = self.ahrs.try_get();
                 match sub {
                     AscentSubState::Burn => {
                         // TODO: test;
                         // if acceleration is negative in z and it's already off the rail (velocity is somewhat high), switch to Coast
-                        if self.ahrs.acceleration_earth.z < -0.01 && self.ahrs.velocity_earth.z > 20.0 {
+                        if let Some(ahrs) = ahrs_opt && ahrs.acceleration_earth.z < -0.01 && ahrs.velocity_earth.z > 20.0 {
                             self.transition_to(FlightState::Ascent(AscentSubState::Coast));
                         }
                     }
                     AscentSubState::Coast => {
                         // TODO: is apogee enough? do I need to do something more precise to detect drogue?
-                        if self.ahrs.velocity_earth.z < 0.0 { // Apogee detected
+                        if let Some(ahrs) = ahrs_opt && ahrs.velocity_earth.z < 0.0 { // Apogee detected
                             if HAS_DROGUE_CHUTE { // TODO: How does Rust do things like this? Features?
-                                self.transition_to(FlightState::Recovery(RecoverySubState::DrogueDeploy));
+                                self.transition_to(FlightState::Descent(DescentSubState::DrogueDeploy));
                             } else {
-                                self.transition_to(FlightState::Recovery(RecoverySubState::MainDeploy))
+                                self.transition_to(FlightState::Descent(DescentSubState::MainDeploy))
                             }
                         }
                     }
                 }
             }
 
-            FlightState::Recovery(sub) => {
-                CONTROL_SETPOINT.sender().send(ControlSetpoint::Disarmed);
+            FlightState::Descent(sub) => {
+                set_control_setpoint(ControlSetpoint::Neutral);
                 match sub {
-                    RecoverySubState::DrogueDeploy => {}
-                    RecoverySubState::MainDeploy => {}
-                    RecoverySubState::Landed => {}
+                    DescentSubState::DrogueDeploy => {}
+                    DescentSubState::MainDeploy => {}
                 }
+            }
+            FlightState::Landed => {
+                set_control_setpoint(ControlSetpoint::Neutral);
+                // TODO: eject SD here
             }
         }
     }
@@ -263,18 +256,24 @@ impl<'a, I2C: embedded_hal::i2c::I2c> SystemState<'a, I2C> {
         // TODO: log
         info!("transitioning to state {:?}", next_state);
         if next_state == FlightState::Ascent(AscentSubState::Burn) {
-            self.ahrs.launch();
-            // Captured here rather than in the control loop so the reference is
-            // the attitude at the instant of ignition, not up to one control
-            // period later.
-            self.launch_orientation = self.ahrs.get_orientation_earth();
-            self.ignition_time = Some(Instant::now());
-        }
-        if next_state == FlightState::Recovery(RecoverySubState::Landed) {
-            self.ahrs.landing();
+            self.handle_ignition();
         }
 
         FLIGHT_STATE.sender().send(next_state);
+    }
+
+    fn handle_ignition(&mut self) {
+        match self.ahrs.try_get() {
+            Some(ahrs) => {
+                arm_control();
+                self.launch_orientation = ahrs.get_orientation_earth();
+                self.ignition_time = Some(Instant::now());
+            }
+            None => {
+                error!("ignition detected but no AHRS solution available; disabling fins");
+                disarm_control();
+            }
+        }
     }
 }
 

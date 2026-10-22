@@ -5,9 +5,10 @@ edition = "2024"
 description = "Macalester rocket avionics, Rust + Embassy port for RP2350"
 license = "MIT"
 publish = false
+authors = ["Anna Simmons <anna@simmons.ovh>"]
 
 [[bin]]
-name = "rocket-avionics"
+name = "annas-avionics"
 path = "src/main.rs"
 test = false
 bench = false

@@ -58,7 +58,7 @@ bind_interrupts!(struct Irqs {
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
 
-pub static FLIGHT_STATE: Watch<CriticalSectionRawMutex, FlightState, 2> = Watch::new();
+pub static FLIGHT_STATE: Watch<CriticalSectionRawMutex, FlightState, 3> = Watch::new();
 
 // TODO: Move this I2C0 out into a type variable
 pub static I2C_BUS_CELL: StaticCell<Mutex<NoopRawMutex, RefCell<i2c::I2c<I2C0, i2c::Blocking>>>> = StaticCell::new();

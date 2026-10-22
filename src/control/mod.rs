@@ -19,15 +19,21 @@ pub mod fins;
 pub mod pid;
 pub mod servo;
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use crate::config::board::ServoConfig;
 use crate::control::pid::RollPid;
 use crate::control::servo::init_servos;
 use crate::navigation::ahrs::AHRS_STATE;
-use crate::state::{CONTROL_SETPOINT, ControlSetpoint};
 use crate::utils::errors::{Subsystem, SubsystemError, clear_runtime_error, mark_init_complete, report_init_error, report_runtime_error};
 use defmt::{Debug2Format, Format, info};
 use embassy_rp::pwm;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::mutex::Mutex;
+use embassy_sync::signal::Signal;
+use embassy_sync::watch::Watch;
 use embassy_time::{Duration, Ticker};
+use serde::{Deserialize, Serialize};
+use crate::utils::math::Quat;
 
 /// Everything that can go wrong in the attitude control subsystem.
 ///
@@ -66,6 +72,42 @@ impl SubsystemError for ControlError {
     }
 }
 
+/// What the control loop should be doing. The state machine owns the mission
+/// timeline, so it decides the attitude to hold; the control loop only knows how
+/// to get there.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, defmt::Format)]
+pub enum ControlSetpoint {
+    /// Fins centered, PID held in reset.
+    Neutral,
+    /// Drive the airframe to this absolute attitude.
+    Attitude(Quat),
+}
+
+/// Latest control setpoint. A `Watch` because the control loop wants whatever is
+/// current when its own ticker fires — a queue would let setpoints pile up and
+/// be actuated late.
+static CONTROL_SETPOINT: Watch<CriticalSectionRawMutex, ControlSetpoint, 2> = Watch::new();
+static CONTROL_ARMED: AtomicBool = AtomicBool::new(false);
+
+pub fn is_control_armed() -> bool {
+    CONTROL_ARMED.load(Ordering::Acquire)
+}
+
+/// Disarms the control loop, such as in case of a fault. Control setpoints do nothing when disarmed.
+pub fn disarm_control() {
+    CONTROL_ARMED.store(false, Ordering::Release);
+    CONTROL_SETPOINT.sender().send(ControlSetpoint::Neutral);
+}
+pub fn arm_control() {
+    CONTROL_ARMED.store(true, Ordering::Release);
+}
+
+pub fn set_control_setpoint(setpoint: ControlSetpoint) {
+    if is_control_armed() {
+        CONTROL_SETPOINT.sender().send(setpoint);
+    }
+}
+
 pub async fn control_loop(servo_config: ServoConfig) {
     info!("initializing servos");
     let mut servos = match init_servos(servo_config) {
@@ -100,7 +142,7 @@ pub async fn control_loop(servo_config: ServoConfig) {
         // and the setpoint is whatever is current at that moment. Treat a
         // missing setpoint or AHRS solution as disarmed — before the first
         // sensor sample there is nothing to control against.
-        let setpoint = setpoint_rx.try_get().unwrap_or(ControlSetpoint::Disarmed);
+        let setpoint = setpoint_rx.try_get().unwrap_or(ControlSetpoint::Neutral);
         let ahrs = ahrs_rx.try_get();
 
         let command = match (setpoint, ahrs) {
