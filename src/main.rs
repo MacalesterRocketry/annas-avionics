@@ -105,7 +105,7 @@ fn spawn_core(
     });
 }
 
-/// Core 0: everything fast and time-sensitive: sensors, AHRS, PID, servos, and the state machine.
+/// Core 0: everything fast and time-sensitive
 #[embassy_executor::task]
 async fn core0_main(
     i2c_config: I2cConfig,
@@ -121,7 +121,7 @@ async fn core0_main(
     ).await;
 }
 
-/// Core 1: everything slow or where timing is unimportant: GPS, SD writes, and indication.
+/// Core 1: everything slow or where timing is unimportant
 #[embassy_executor::task]
 async fn core1_main(
     sd_config: SdConfig,
@@ -129,9 +129,6 @@ async fn core1_main(
     indicators_config: IndicatorsConfig,
 ) {
     info!("core 1: I/O task starting");
-
-    // TODO:
-    //   • init SD card (SPI1 @ 50 MHz, embedded-sdmmc::VolumeManager)
 
     embassy_futures::join::join3(
         indicator_loop(indicators_config),

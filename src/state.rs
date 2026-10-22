@@ -20,7 +20,7 @@ use embassy_rp::gpio::Input;
 use embassy_rp::i2c;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::watch::{Receiver, Watch};
+use embassy_sync::watch::Receiver;
 use embassy_time::{Duration, Instant, Ticker};
 use serde::{Deserialize, Serialize};
 pub(crate) use crate::control::{disarm_control, set_control_setpoint, ControlSetpoint, arm_control};
@@ -186,8 +186,10 @@ impl<'a, I2C: embedded_hal::i2c::I2c> SystemState<'a, I2C> {
                     }
                 }
                 GroundSubState::ReadyToLaunch(gps_state) => {
-                    if self.ahrs.try_get().has_launched() {
-                        self.transition_to(FlightState::Ascent(AscentSubState::Burn));
+                    if let Some(ahrs) = self.ahrs.try_get() {
+                        if ahrs.mode == AhrsMode::Flight {
+                            self.transition_to(FlightState::Ascent(AscentSubState::Burn));
+                        }
                     }
                     let has_fix = match self.gps.try_get() {
                         Some(gps) => gps.has_fix,

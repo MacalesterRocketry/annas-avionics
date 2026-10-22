@@ -22,7 +22,6 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_time::Instant;
 use embedded_hal::i2c::I2c;
-use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy)]
 pub struct TimedSample<T> {
@@ -58,11 +57,9 @@ impl SubsystemError for SensorError {
     }
 }
 
-pub fn init_adxl<M: RawMutex, BUS: I2c>(interrupt_config: &InterruptConfig, mutex: &'static Mutex<M, RefCell<BUS>>) -> Option<adxl375::Adxl<I2cDevice<'static, M, BUS>>> {
-    let adxl_int1 = Input::new(interrupt_config.adxl_int1, Pull::Down);
-    let adxl_int2 = Input::new(interrupt_config.adxl_int2, Pull::Down);
+pub fn init_adxl<M: RawMutex, BUS: I2c>(int1: Input<'static>, int2: Input<'static>, mutex: &'static Mutex<M, RefCell<BUS>>) -> Option<adxl375::Adxl<I2cDevice<'static, M, BUS>>> {
     let adxl_bus = I2cDevice::new(mutex);
-    match adxl375::Adxl::init(adxl_bus, adxl_int1, adxl_int2) {
+    match adxl375::Adxl::init(adxl_bus, int1, int2) {
         Ok(driver) => Some(driver),
         Err(e) => {
             report_init_error(SensorError::Adxl(e));
@@ -71,11 +68,9 @@ pub fn init_adxl<M: RawMutex, BUS: I2c>(interrupt_config: &InterruptConfig, mute
         }
     }
 }
-pub fn init_lsm<M: RawMutex, BUS: I2c>(interrupt_config: &InterruptConfig, mutex: &'static Mutex<M, RefCell<BUS>>) -> Option<lsm6dsox::Lsm<I2cDevice<'static, M, BUS>>> {
-    let lsm_int1 = Input::new(interrupt_config.lsm_int1, Pull::Down);
-    let lsm_int2 = Input::new(interrupt_config.lsm_int2, Pull::Down);
+pub fn init_lsm<M: RawMutex, BUS: I2c>(int1: Input<'static>, int2: Input<'static>, mutex: &'static Mutex<M, RefCell<BUS>>) -> Option<lsm6dsox::Lsm<I2cDevice<'static, M, BUS>>> {
     let lsm_bus = I2cDevice::new(mutex);
-    match lsm6dsox::Lsm::init(lsm_bus, lsm_int1, lsm_int2) {
+    match lsm6dsox::Lsm::init(lsm_bus, int1, int2) {
         Ok(driver) => Some(driver),
         Err(e) => {
             report_init_error(SensorError::Lsm(e));
@@ -84,10 +79,9 @@ pub fn init_lsm<M: RawMutex, BUS: I2c>(interrupt_config: &InterruptConfig, mutex
         }
     }
 }
-pub fn init_bmp<M: RawMutex, BUS: I2c>(interrupt_config: &InterruptConfig, mutex: &'static Mutex<M, RefCell<BUS>>) -> Option<bmp390::Bmp<I2cDevice<'static, M, BUS>>> {
-    let bmp_int = Input::new(interrupt_config.bmp_int, Pull::Down);
+pub fn init_bmp<M: RawMutex, BUS: I2c>(int: Input<'static>, mutex: &'static Mutex<M, RefCell<BUS>>) -> Option<bmp390::Bmp<I2cDevice<'static, M, BUS>>> {
     let bmp_bus = I2cDevice::new(mutex);
-    match bmp390::Bmp::init(bmp_bus, bmp_int) {
+    match bmp390::Bmp::init(bmp_bus, int) {
         Ok(driver) => Some(driver),
         Err(e) => {
             report_init_error(SensorError::Bmp(e));
@@ -100,9 +94,15 @@ pub fn init_bmp<M: RawMutex, BUS: I2c>(interrupt_config: &InterruptConfig, mutex
 /// Attempt to initialize every sensor on the shared I²C bus. Errors are marked individually,
 /// but the overall sensor system can still be used even if some chips aren't working.
 pub fn init_all<M: RawMutex, BUS: I2c>(interrupt_config: InterruptConfig, mutex: &'static Mutex<M, RefCell<BUS>>) -> Sensors<I2cDevice<'static, M, BUS>> {
-    let adxl = init_adxl(&interrupt_config, mutex);
-    let lsm = init_lsm(&interrupt_config, mutex);
-    let bmp = init_bmp(&interrupt_config, mutex);
+    let adxl_int1 = Input::new(interrupt_config.adxl_int1, Pull::Down);
+    let adxl_int2 = Input::new(interrupt_config.adxl_int2, Pull::Down);
+    let lsm_int1 = Input::new(interrupt_config.lsm_int1, Pull::Down);
+    let lsm_int2 = Input::new(interrupt_config.lsm_int2, Pull::Down);
+    let bmp_int = Input::new(interrupt_config.bmp_int, Pull::Down);
+
+    let adxl = init_adxl(adxl_int1, adxl_int2, mutex);
+    let lsm = init_lsm(lsm_int1, lsm_int2, mutex);
+    let bmp = init_bmp(bmp_int, mutex);
 
     if health::faults().is_empty() {
         mark_init_complete(Subsystem::SENSORS);
@@ -126,8 +126,11 @@ pub trait Sensor {
     /// Read the sensor, returning a bias-corrected reading in the body frame, generally in SI units.
     /// Returns `None` if the chip is not responding.
     fn read(&mut self) -> Result<TimedSample<Self::Reading>, Self::Error> where Self: Sized;
-    async fn read_on_interrupt(&mut self) -> Result<TimedSample<Self::Reading>, Self::Error> where Self: Sized;
-    async fn wait_for_interrupt(&mut self) where Self: Sized;
+    async fn read_on_interrupt(&mut self) -> Result<TimedSample<Self::Reading>, Self::Error> where Self: Sized {
+        self.wait_for_interrupt().await?;
+        self.read()
+    }
+    async fn wait_for_interrupt(&mut self) -> Result<(), Self::Error> where Self: Sized;
 }
 
 pub trait AccelerometerReading {

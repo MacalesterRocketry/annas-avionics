@@ -52,9 +52,16 @@ impl<I2C: I2c> Sensor for Adxl<I2C> {
     type Reading = AdxlReading;
     type Error = Error;
 
-    /// Read XYZ, bias-corrected to m/s².
-    async fn read(&mut self) -> Result<TimedSample<Self::Reading>, Self::Error> {
+    async fn wait_for_interrupt(&mut self) -> Result<(), Self::Error>
+        where
+            Self: Sized,
+    {
         self.int1.wait_for_high().await; // TODO: Decide if we want this.
+        Ok(())
+    }
+
+    /// Read XYZ, bias-corrected to m/s².
+    fn read(&mut self) -> Result<TimedSample<Self::Reading>, Self::Error> {
         let raw: Vec3 = self.driver.read_axis().map_err(|_| Error::Read)?.into();
         // The sensor is mounted in a different orientation than we want, so we need to transform the axes.
         let transformed = transform_sensor_axes(raw * G);

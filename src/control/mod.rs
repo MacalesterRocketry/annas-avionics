@@ -28,8 +28,6 @@ use crate::utils::errors::{Subsystem, SubsystemError, clear_runtime_error, mark_
 use defmt::{Debug2Format, Format, info};
 use embassy_rp::pwm;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::mutex::Mutex;
-use embassy_sync::signal::Signal;
 use embassy_sync::watch::Watch;
 use embassy_time::{Duration, Ticker};
 use serde::{Deserialize, Serialize};

@@ -48,7 +48,7 @@ impl<I2C: I2c> Sensor for Bmp<I2C> {
     type Reading = BmpReading;
     type Error = Error;
 
-    async fn read(&mut self) -> Result<TimedSample<Self::Reading>, Self::Error> {
+    fn read(&mut self) -> Result<TimedSample<Self::Reading>, Self::Error> {
         let measurement = self.driver.measure().map_err(|_| Error::Read)?; // TODO: handle error better
         // TODO: wait for interrupt
         Ok(TimedSample {
@@ -60,6 +60,10 @@ impl<I2C: I2c> Sensor for Bmp<I2C> {
             },
             sampled_at: Instant::now(),
         })
+    }
+
+    async fn wait_for_interrupt(&mut self) -> Result<(), Self::Error> where Self: Sized {
+        todo!()
     }
 }
 

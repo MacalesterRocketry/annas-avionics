@@ -24,17 +24,16 @@
 //! documented in ST's datasheet and we only need a handful of writes.
 //! TODO: Rotate the result to the correct orientation, since it sits in an orientation
 //!  where -y is what we want Z to be.
+use crate::config::{G, LSM_ACCEL_BIAS, LSM_GYRO_BIAS};
+use crate::sensors::{AccelerometerReading, GyroscopeReading, Sensor, TemperatureReading, TimedSample, transform_sensor_axes};
+use crate::utils::math::{AngularVec3, Vec3};
 use accelerometer::Accelerometer;
 use defmt::*;
-use embassy_futures::select::{select, Either};
 use embassy_rp::gpio::Input;
-use embassy_time::{Delay, Instant, Timer};
+use embassy_time::{Delay, Instant};
 use embedded_hal::i2c::I2c;
 use lsm6dsox::*;
 use serde::{Deserialize, Serialize};
-use crate::config::{G, LSM_ACCEL_BIAS, LSM_GYRO_BIAS};
-use crate::sensors::{transform_sensor_axes, Sensor, AccelerometerReading, GyroscopeReading, TemperatureReading, TimedSample};
-use crate::utils::math::{AngularVec3, Vec3};
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, defmt::Format)]
 pub struct LsmReading {
@@ -155,14 +154,9 @@ impl<I2C: I2c> Sensor for Lsm<I2C> {
     type Reading = LsmReading;
     type Error = Error;
 
-    async fn wait_for_interrupt(&mut self) {
+    async fn wait_for_interrupt(&mut self) -> Result<(), Self::Error> {
         self.int1.wait_for_high().await;
-    }
-
-    /// Read XYZ, bias-corrected to m/s².
-    async fn read_on_interrupt(&mut self) -> Result<TimedSample<Self::Reading>, Self::Error> {
-        self.wait_for_interrupt().await;
-        self.read()
+        Ok(())
     }
 
     fn read(&mut self) -> Result<TimedSample<Self::Reading>, Self::Error> {

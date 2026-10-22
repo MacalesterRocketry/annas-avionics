@@ -1,26 +1,25 @@
 // TODO: These are all pure functions, so this is all unit testable without even needing to run on the board.
 //  Figure out a way to do that.
 
-use core::cmp::PartialEq;
-use crate::utils::{serialize_instant, deserialize_instant};
-use crate::config::{AHRS_ACC_BETA, AHRS_MAG_BETA, G, GYRO_LPF_HZ};
+use crate::FLIGHT_STATE;
+use crate::config::{AHRS_ACC_BETA, AHRS_MAG_BETA, G, GYRO_LPF_HZ, LAUNCH_ACCEL_THRESHOLD_G};
+use crate::sensors::health::SensorFault;
+use crate::sensors::lsm6dsox::{Error, LsmError};
+use crate::sensors::{Sensor, SensorError, health};
+use crate::state::{FlightState, GroundSubState};
 use crate::utils::duration_to_seconds;
+use crate::utils::errors::{Subsystem, SubsystemError, report_init_error};
 use crate::utils::math::{AngularVec3, Grad4, Quat, Vec3, axis_angle_rad_to_quat};
+use crate::utils::{deserialize_instant, serialize_instant};
+use core::cmp::PartialEq;
 use core::f64::consts::PI;
-use defmt::{Format, Formatter};
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::watch::Watch;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_hal::i2c::I2c;
 use libm::sqrt;
 use serde::{Deserialize, Serialize};
-use crate::FLIGHT_STATE;
-use crate::sensors::lsm6dsox::{Error, LsmError};
-use crate::sensors::{health, Sensor, SensorError};
-use crate::sensors::health::SensorFault;
-use crate::state::{FlightState, GroundSubState};
-use crate::utils::errors::{report_init_error, SubsystemError, Subsystem};
 
 /// Latest AHRS solution, published once per sensor sample.
 pub static AHRS_STATE: Watch<CriticalSectionRawMutex, AhrsState, 2> = Watch::new();
@@ -69,6 +68,13 @@ impl Default for AhrsState {
 
 impl AhrsState {
     pub fn update(&mut self, gyro: AngularVec3, accel: Option<Vec3>, mag: Option<Vec3>, now: Instant) {
+        if self.mode == AhrsMode::Ground {
+            if let Some(accel) = accel {
+                if accel.mag() / G > LAUNCH_ACCEL_THRESHOLD_G {
+                    self.set_mode(AhrsMode::Flight);
+                }
+            }
+        }
         let dt = now - self.last_update;
         self.last_update = now;
 
@@ -333,7 +339,7 @@ pub fn rotate_earth_to_body(q: Quat, v_e: Vec3) -> Vec3 {
 }
 
 #[derive(Debug, defmt::Format)]
-pub enum AhrsError {
+pub enum AhrsError { // TODO: implement
     NoFlightStateReceiver,
 }
 
