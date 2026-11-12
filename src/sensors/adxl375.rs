@@ -11,14 +11,20 @@
 //!   needs a magnitude spike so it is tolerant, but `merged_accel` feeds AHRS
 //!   once the low-G accel saturates, and that path is not.
 
+use crate::config::{ADXL_BIAS, G};
+use crate::sensors::health::SensorFault;
+use crate::sensors::{AccelerometerReading, Sensor, SensorError, SensorResult, TimedSample, health, transform_sensor_axes};
+use crate::utils::errors::report_runtime_error;
+use crate::utils::math::Vec3;
 use adxl3xx::{Adxl375 as Adxl3xxDriver, AdxlBusI2c};
 use embassy_rp::gpio::Input;
-use embassy_time::Instant;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::watch::Watch;
+use embassy_time::{Duration, Instant};
 use embedded_hal::i2c::I2c;
 use serde::{Deserialize, Serialize};
-use crate::config::{G, ADXL_BIAS};
-use crate::sensors::{transform_sensor_axes, Sensor, AccelerometerReading, TimedSample};
-use crate::utils::math::Vec3;
+
+pub static ADXL_LATEST: Watch<CriticalSectionRawMutex, TimedSample<AdxlReading>, 2> = Watch::new();
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, defmt::Format)]
 pub struct AdxlReading {
@@ -66,11 +72,32 @@ impl<I2C: I2c> Sensor for Adxl<I2C> {
         // The sensor is mounted in a different orientation than we want, so we need to transform the axes.
         let transformed = transform_sensor_axes(raw * G);
         Ok(TimedSample {
-            value: AdxlReading { // TODO: Decide if I want to have optional returns or async returns. Leaning toward the latter, but unsure. Will need work either way.
+            value: AdxlReading {
                 accel: transformed - ADXL_BIAS,
             },
             sampled_at: Instant::now(),
         })
+    }
+
+    async fn sensor_loop(&mut self) {
+        const MAX_DRDY_GAP: Duration = Duration::from_millis(20);
+
+        // TODO: Add a validity flag so the control loop disarms itself
+        loop {
+            let data = self.read_on_interrupt_or(MAX_DRDY_GAP).await;
+            match data {
+                SensorResult::Ok(sample) => {
+                    ADXL_LATEST.sender().send(sample);
+                }
+                SensorResult::Stale(sample) => {
+                    // TODO: Handle stale data; we don't actually know for sure that it's not new
+                }
+                SensorResult::Err(e) => {
+                    report_runtime_error(SensorError::Adxl(e));
+                    health::mark_faulted(SensorFault::ADXL);
+                }
+            }
+        }
     }
 }
 

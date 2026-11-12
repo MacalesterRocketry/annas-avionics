@@ -17,10 +17,11 @@ use crate::utils::errors::{Subsystem, SubsystemError, mark_init_complete, report
 use crate::utils::math::{AngularVec3, Vec3};
 use core::cell::RefCell;
 use embassy_embedded_hal::shared_bus::blocking::i2c::I2cDevice;
+use embassy_futures::select::{select, Either};
 use embassy_rp::gpio::{Input, Pull};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::RawMutex;
-use embassy_time::Instant;
+use embassy_time::{Duration, Instant, Timer};
 use embedded_hal::i2c::I2c;
 
 #[derive(Clone, Copy)]
@@ -118,11 +119,35 @@ pub fn init_all<M: RawMutex, BUS: I2c>(interrupt_config: InterruptConfig, mutex:
     }
 }
 
+pub enum SensorResult<T, E> {
+    Ok(T),
+    Stale(T),
+    Err(E),
+}
+impl<T, E> SensorResult<T, E> {
+    pub fn to_stale(self) -> Self {
+        match self {
+            SensorResult::Ok(value) => SensorResult::Stale(value),
+            SensorResult::Stale(value) => SensorResult::Stale(value),
+            SensorResult::Err(error) => SensorResult::Err(error),
+        }
+    }
+}
+impl<T, E> Into<SensorResult<T, E>> for Result<T, E> {
+    fn into(self) -> SensorResult<T, E> {
+        match self {
+            Ok(value) => SensorResult::Ok(value),
+            Err(error) => SensorResult::Err(error),
+        }
+    }
+}
+
 pub trait Sensor {
     type Bus: I2c;
     type Reading;
     type Error;
 
+    async fn wait_for_interrupt(&mut self) -> Result<(), Self::Error> where Self: Sized;
     /// Read the sensor, returning a bias-corrected reading in the body frame, generally in SI units.
     /// Returns `None` if the chip is not responding.
     fn read(&mut self) -> Result<TimedSample<Self::Reading>, Self::Error> where Self: Sized;
@@ -130,7 +155,19 @@ pub trait Sensor {
         self.wait_for_interrupt().await?;
         self.read()
     }
-    async fn wait_for_interrupt(&mut self) -> Result<(), Self::Error> where Self: Sized;
+    async fn read_on_interrupt_or(&mut self, deadline: Duration) -> SensorResult<TimedSample<Self::Reading>, Self::Error> where Self: Sized {
+        match select(
+            self.wait_for_interrupt(),
+            Timer::after(deadline),
+        ).await {
+            Either::First(_) => self.read().into(),
+            Either::Second(_) => {
+                let result: SensorResult<TimedSample<Self::Reading>, Self::Error> = self.read().into();
+                result.to_stale()
+            }
+        }
+    }
+    async fn sensor_loop(&mut self);
 }
 
 pub trait AccelerometerReading {

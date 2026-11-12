@@ -24,6 +24,7 @@ use embassy_sync::watch::Receiver;
 use embassy_time::{Duration, Instant, Ticker};
 use serde::{Deserialize, Serialize};
 pub(crate) use crate::control::{disarm_control, set_control_setpoint, ControlSetpoint, arm_control};
+use crate::sensors::lsm6dsox::LAUNCH_DETECTED;
 
 pub struct SystemState<'a, I2C: embedded_hal::i2c::I2c> {
     pub state: Receiver<'a, CriticalSectionRawMutex, FlightState, 3>,
@@ -186,10 +187,8 @@ impl<'a, I2C: embedded_hal::i2c::I2c> SystemState<'a, I2C> {
                     }
                 }
                 GroundSubState::ReadyToLaunch(gps_state) => {
-                    if let Some(ahrs) = self.ahrs.try_get() {
-                        if ahrs.mode == AhrsMode::Flight {
-                            self.transition_to(FlightState::Ascent(AscentSubState::Burn));
-                        }
+                    if LAUNCH_DETECTED.signaled() {
+                        self.transition_to(FlightState::Ascent(AscentSubState::Burn));
                     }
                     let has_fix = match self.gps.try_get() {
                         Some(gps) => gps.has_fix,
@@ -257,8 +256,14 @@ impl<'a, I2C: embedded_hal::i2c::I2c> SystemState<'a, I2C> {
     fn transition_to(&mut self, next_state: FlightState) {
         // TODO: log
         info!("transitioning to state {:?}", next_state);
-        if next_state == FlightState::Ascent(AscentSubState::Burn) {
-            self.handle_ignition();
+        match next_state {
+            FlightState::PreLaunch(GroundSubState::ReadyToLaunch(_)) => {
+                LAUNCH_DETECTED.reset()
+            }
+            FlightState::Ascent(AscentSubState::Burn) => {
+                self.handle_ignition();
+            }
+            _ => {}
         }
 
         FLIGHT_STATE.sender().send(next_state);

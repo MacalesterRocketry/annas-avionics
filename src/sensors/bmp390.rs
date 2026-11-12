@@ -65,6 +65,10 @@ impl<I2C: I2c> Sensor for Bmp<I2C> {
     async fn wait_for_interrupt(&mut self) -> Result<(), Self::Error> where Self: Sized {
         todo!()
     }
+
+    async fn sensor_loop(&mut self) {
+        todo!()
+    }
 }
 
 impl<I2C: I2c> Bmp<I2C> {

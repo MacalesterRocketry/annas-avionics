@@ -24,16 +24,22 @@
 //! documented in ST's datasheet and we only need a handful of writes.
 //! TODO: Rotate the result to the correct orientation, since it sits in an orientation
 //!  where -y is what we want Z to be.
-use crate::config::{G, LSM_ACCEL_BIAS, LSM_GYRO_BIAS};
-use crate::sensors::{AccelerometerReading, GyroscopeReading, Sensor, TemperatureReading, TimedSample, transform_sensor_axes};
+use crate::config::{G, LAUNCH_ACCEL_THRESHOLD_G, LSM_ACCEL_BIAS, LSM_GYRO_BIAS};
+use crate::sensors::{transform_sensor_axes, AccelerometerReading, GyroscopeReading, Sensor, SensorError, TemperatureReading, TimedSample, health, SensorResult};
 use crate::utils::math::{AngularVec3, Vec3};
 use accelerometer::Accelerometer;
 use defmt::*;
+use embassy_futures::select::{select, Either};
 use embassy_rp::gpio::Input;
-use embassy_time::{Delay, Instant};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
+use embassy_sync::watch::Watch;
+use embassy_time::{Delay, Duration, Instant, Timer};
 use embedded_hal::i2c::I2c;
 use lsm6dsox::*;
 use serde::{Deserialize, Serialize};
+use crate::sensors::health::SensorFault;
+use crate::utils::errors::{report_init_error, report_runtime_error};
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, defmt::Format)]
 pub struct LsmReading {
@@ -44,6 +50,9 @@ pub struct LsmReading {
     /// Die temperature (°C).
     pub temperature: f32,
 }
+
+pub static LSM_LATEST: Watch<CriticalSectionRawMutex, TimedSample<LsmReading>, 2> = Watch::new();
+pub static LAUNCH_DETECTED: Signal<CriticalSectionRawMutex, bool> = Signal::new();
 
 impl AccelerometerReading for LsmReading {
     fn saturation_threshold_g(&self) -> f64 { 16.0 }
@@ -173,6 +182,31 @@ impl<I2C: I2c> Sensor for Lsm<I2C> {
             },
             sampled_at: Instant::now(),
         })
+    }
+
+    async fn sensor_loop(&mut self) {
+        const MAX_DRDY_GAP: Duration = Duration::from_millis(20);
+
+        // TODO: Add a validity flag so the control loop disarms itself
+        loop {
+            let data = self.read_on_interrupt_or(MAX_DRDY_GAP).await;
+            let test = match data {
+                SensorResult::Ok(sample) => {
+                    // TODO: Use a ring buffer instead
+                    if sample.value.accel.mag() / G > LAUNCH_ACCEL_THRESHOLD_G {
+                        LAUNCH_DETECTED.signal(true)
+                    }
+                    LSM_LATEST.sender().send(sample);
+                }
+                SensorResult::Stale(sample) => {
+                    // TODO: Handle stale data; we don't actually know for sure that it's not new
+                }
+                SensorResult::Err(e) => {
+                    report_runtime_error(SensorError::Lsm(e));
+                    health::mark_faulted(SensorFault::LSM);
+                }
+            };
+        }
     }
 }
 

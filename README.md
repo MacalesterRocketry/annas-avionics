@@ -131,3 +131,6 @@ I think the sensor part should be focused on just reading the sensor and publish
 so then I guess it should consistently publish state and let the state machine detect launch
 when it runs next? The downside is that I won't then be able to use the ADXL hardware interrupt,
 and averaging over a time window will be more difficult (plus a bit of latency).
+
+Also, each sensor should have a loop to publish its most recent state, and the AHRS loop should
+wait for a new one to be produced.
