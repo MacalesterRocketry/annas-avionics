@@ -13,6 +13,9 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[registry]
+global-min-publish-age = "3 days"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Firmware deps (no_std, target = thumbv8m.main-none-eabihf)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -89,7 +92,8 @@ bmp390 = { version = "0.5.0-alpha.1", features = ["default", "defmt", "embassy-t
 adxl3xx   = "0.2" # high-G accelerometer (ADXL375)
 
 measurements = { version = "0.11", default-features = false, features = ["serde"] }
-sensor-fusion = "0.1.12" # TODO: consider using
+#sensor-fusion = "0.1" # TODO: consider using
+# TODO: use vqm for math
 
 [features]
 default = ["hw-v3"]
