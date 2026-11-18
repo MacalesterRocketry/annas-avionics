@@ -199,13 +199,13 @@ pub async fn sensor_loops(i2c_config: I2cConfig, interrupt_config: InterruptConf
     let sensors = init_all(interrupt_config, i2c_mutex);
     info!("sensors initialized");
 
-    // This weird pattern matching is to prevent Rust from trying to interpret it as (!, !, !) for some reason.
-    let (never, _, _) = embassy_futures::join::join3(
+    // This weird match is because join3 returns (!, !, !), while we need to return !. The match
+    // handles each never individually and returns never, so the type checker accepts it.
+    match embassy_futures::join::join3(
         run_sensor(sensors.adxl),
         run_sensor(sensors.lsm),
         run_sensor(sensors.bmp),
-    ).await;
-    never
+    ).await {}
 }
 
 pub trait AccelerometerReading {
