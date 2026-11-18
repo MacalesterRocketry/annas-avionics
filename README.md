@@ -2,6 +2,15 @@
 
 This is the code for the avionics stack for the Macalester College High Power Rocketry team. It is currently in in active development. The Arduino version (under the `platformio` directory) is capable of active roll control, and a rewrite to Rust is underway.
 
+Important information for understanding the code:
+- Everything is based around a state machine in `src/state.rs`, which keeps keeps track of whatever is happening to the rocket at the moment (e.g. launching). Other modules can use receivers on the state to decide how to act.
+- The system uses a few sensors:
+  - the LSM6DSOX is the gyroscope and low-G accelerometer. Use this as the primary source of data.
+  - the ADXL375 is the high-G accelerometer. Use this as a fallback for when the LSM is saturated.
+  - the BMP390 is the barometer, which can tell us the absolute altitude rather than depending on previous values.
+  - we're going to need a magnetometer to tell us absolute orientation, but we haven't yet decided on one.
+- Every function runs in a series of async loops. Each one runs its own system and sends information about its state on Watches, Channels, and Signals, which the others can read.
+
 For the Rust version, here's how to run it. For each, append `--release` if the code on the device is running in release mode. This includes all the "just attach" versions; the logger needs to match its lookup table to whatever is running on the device.
 
 Build, flash, and attach: `cargo embed`

@@ -1,9 +1,4 @@
 //! Vec3 / Quat math, ported from C++ `utils.h` + `utils.cpp`.
-//!
-//! Kept `f64` to preserve the existing AHRS behavior bit-for-bit. The RP2350
-//! has only a single-precision FPU, so `f64` math is soft-float — same regime
-//! as the RP2040 (M0+, no FPU at all), but with the M33 ALU it's noticeably
-//! faster. See PORTING_PLAN.md for the f32 conversion option.
 
 #![allow(clippy::many_single_char_names)]
 

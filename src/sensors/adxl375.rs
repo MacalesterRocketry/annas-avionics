@@ -1,15 +1,6 @@
-//! ADXL375 ±200 g accelerometer (I²C). Wraps the `adxl3xx` driver crate.
-//!
-//! Scale factor: 49 mg/LSB on ADXL375 (per datasheet table 1).
-//!
-//! TODO: `init_defaults` leaves this at the datasheet default 800 Hz ODR while
-//!   the loop reads it at ~400 Hz, so content above 200 Hz aliases down into the
-//!   band at the read and cannot be filtered out afterward. The ADXL375's
-//!   internal anti-alias filter is tied to the ODR (roughly ODR/4), so pick the
-//!   ODR deliberately against the read rate instead of taking the default —
-//!   same reasoning as the gyro TODO in `lsm6dsox.rs`. Launch detection only
-//!   needs a magnitude spike so it is tolerant, but `merged_accel` feeds AHRS
-//!   once the low-G accel saturates, and that path is not.
+//! ADXL375 is the high-G accelerometer; supports up to 200g
+//! It's less precise and has larger fluctuations than the LSM6DSOX (the low-G accelerometer),
+//! so it should only be used if that's already saturated.
 
 use crate::config::{ADXL_BIAS, G};
 use crate::sensors::health::SensorFault;
@@ -39,11 +30,8 @@ impl AccelerometerReading for AdxlReading {
 
 #[derive(Debug, defmt::Format)]
 pub enum Error {
-    /// Device ID mismatch or register I/O failure during setup.
     Init,
-    /// Axis-offset calibration failed.
     Calibration,
-    /// Axis read failed.
     Read,
 }
 
@@ -66,7 +54,9 @@ impl<I2C: I2c> Sensor for Adxl<I2C> {
         Ok(())
     }
 
-    /// Read XYZ, bias-corrected to m/s².
+    /// Read the high-G accelerometer immediately (not waiting for a new value).
+    /// Returns a bias-corrected value that's already been transformed to the correct orientation.
+    /// Units of m/s².
     fn read(&mut self) -> Result<TimedSample<Self::Reading>, Self::Error> {
         let raw: Vec3 = self.driver.read_axis().map_err(|_| Error::Read)?.into();
         // The sensor is mounted in a different orientation than we want, so we need to transform the axes.
@@ -79,7 +69,7 @@ impl<I2C: I2c> Sensor for Adxl<I2C> {
         })
     }
 
-    async fn sensor_loop(&mut self) {
+    async fn sensor_loop(&mut self) -> ! {
         const MAX_DRDY_GAP: Duration = Duration::from_millis(20);
 
         // TODO: Add a validity flag so the control loop disarms itself
@@ -102,11 +92,6 @@ impl<I2C: I2c> Sensor for Adxl<I2C> {
 }
 
 impl<I2C: I2c> Adxl<I2C> {
-    /// Bring up the high-G accelerometer: validate device ID, reset to
-    /// datasheet defaults (800 Hz, FIFO stream), and run axis-offset
-    /// calibration. Mirrors `initHighGAccelerometer()` in the C++ source,
-    /// minus the activity-interrupt wiring — launch detection currently
-    /// polls magnitude instead (see `SensorReadings::has_launched`).
     pub(crate) fn init(i2c: I2C, int_pin1: Input<'static>, int_pin2: Input<'static>) -> Result<Self, Error> where Self: Sized {
         let bus = AdxlBusI2c { i2c, addr: adxl3xx::reg::ADXL_ADDR };
         let mut driver = Adxl3xxDriver::new(bus).map_err(|_| Error::Init)?;

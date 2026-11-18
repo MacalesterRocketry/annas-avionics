@@ -1,3 +1,7 @@
+//! AHRS (attitude and heading reference system) is what determines the rocket's orientation.
+//! This file also uses it to determine the position.
+//! Currently, we're using a Madgwick filter.
+
 // TODO: These are all pure functions, so this is all unit testable without even needing to run on the board.
 //  Figure out a way to do that.
 
@@ -6,7 +10,6 @@ use crate::config::{AHRS_ACC_BETA, AHRS_MAG_BETA, G, GYRO_LPF_HZ, LAUNCH_ACCEL_T
 use crate::sensors::health::SensorFault;
 use crate::sensors::lsm6dsox::{Error, LsmError};
 use crate::sensors::{Sensor, SensorError, health};
-use crate::state::{FlightState, GroundSubState};
 use crate::utils::duration_to_seconds;
 use crate::utils::errors::{Subsystem, SubsystemError, report_init_error};
 use crate::utils::math::{AngularVec3, Grad4, Quat, Vec3, axis_angle_rad_to_quat};
@@ -349,26 +352,26 @@ impl SubsystemError for AhrsError {
     }
 }
 
-pub async fn ahrs_loop<I2C: I2c>(mut lsm: crate::sensors::lsm6dsox::Lsm<I2C>) {
+pub async fn ahrs_loop<I2C: I2c>(mut lsm: crate::sensors::lsm6dsox::Lsm<I2C>) -> ! { // TODO: shouldn't take any arguments, I don't think
     const MAX_DRDY_GAP: Duration = Duration::from_millis(20);
     let mut ahrs = AhrsState::default();
     AHRS_STATE.sender().send(ahrs);
-    
+
     let Some(mut flight_state_rx) = FLIGHT_STATE.receiver() else {
         report_init_error(AhrsError::NoFlightStateReceiver);
-        return;
+        panic!(); // TODO: this is just a placeholder to get it to compile, never do this. We need to figure out a better way to handle errors here.
     };
 
     // TODO: Add a validity flag so the control loop disarms itself
     loop {
         let data = match select(
-            lsm.wait_for_interrupt(),
+            lsm.wait_for_interrupt(), // TODO: this all needs to change to use a receiver from the Watch in the LSM
             Timer::after(MAX_DRDY_GAP),
         ).await {
-            Either::First(Ok(())) => {
-                let flight_state = flight_state_rx.try_get().unwrap_or(FlightState::PreLaunch(GroundSubState::Startup));
+            Either::First(Ok(())) => {  // interrupt: new data
+                let flight_state = flight_state_rx.try_get().unwrap_or_default();
                 ahrs.set_mode(flight_state.ahrs_mode());
-                
+
                 // Read/drain FIFO, publish AHRS, mark healthy.
                 let data = lsm.read();
                 match data {
@@ -384,7 +387,7 @@ pub async fn ahrs_loop<I2C: I2c>(mut lsm: crate::sensors::lsm6dsox::Lsm<I2C>) {
                     }
                 }
             }
-            Either::Second(()) => {
+            Either::Second(()) => { // timeout
                 // Mark interrupt/sample path stale; probe sensor status/recover.
                 // TODO: mark stale
                 lsm.read()

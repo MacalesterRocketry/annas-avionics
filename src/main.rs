@@ -18,7 +18,7 @@ use crate::config::board::{GpsConfig, I2cConfig, IndicatorsConfig, InterruptConf
 use crate::config::board::ServoConfig;
 use crate::control::control_loop;
 use crate::navigation::gps::gps_loop;
-use crate::state::{FlightState, system_loop};
+use crate::state::{FlightState, state_machine_loop};
 use communication::indication::indicator_loop;
 use defmt::*;
 use defmt_rtt as _;
@@ -31,6 +31,8 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
 use embassy_sync::watch::Watch;
 use static_cell::StaticCell;
+use crate::navigation::ahrs::ahrs_loop;
+use crate::sensors::sensor_loops;
 
 mod config;
 mod navigation;
@@ -67,7 +69,7 @@ pub static I2C_BUS_CELL: StaticCell<Mutex<NoopRawMutex, RefCell<i2c::I2c<I2C0, i
 async fn main(_spawner: Spawner) -> ! {
     FLIGHT_STATE
         .sender()
-        .send(FlightState::PreLaunch(state::GroundSubState::Startup));
+        .send(FlightState::default());
 
     let p = embassy_rp::init(Default::default());
     let hw = take_hardware!(p);
@@ -115,9 +117,11 @@ async fn core0_main(
 ) {
     info!("core 0: avionics task starting");
 
-    embassy_futures::join::join(
-        system_loop(i2c_config, peripheral_config, interrupt_config),
+    embassy_futures::join::join3(
+        state_machine_loop(peripheral_config),
         control_loop(servos_config),
+        sensor_loops(i2c_config, interrupt_config),
+        // ahrs_loop(),
     ).await;
 }
 

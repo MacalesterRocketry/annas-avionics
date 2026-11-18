@@ -1,29 +1,5 @@
-//! LSM6DSOX: gyro + low-G accel (I²C). Skeleton.
-//!
-//! Target config (matches C++):
-//!   - accel range  ±16 g
-//!   - accel ODR    1.66 kHz
-//!   - gyro  range  ±2000 °/s
-//!   - gyro  ODR    1.66 kHz
-//!
-//! TODO: Don't inherit that 1.66 kHz gyro ODR from the C++ — the loop reads this
-//!   at ~400 Hz, so sampling a 1.66 kHz stream decimates it 4x with no filter in
-//!   between and folds everything from 200–830 Hz down into 0–200 Hz. That
-//!   happens at the read, before AHRS sees anything, so no software filter can
-//!   recover it. Instead set the gyro ODR to 416 Hz (the ladder is
-//!   12.5/26/52/104/208/416/833/1660/3330/6660) and enable the on-chip LPF1.
-//!   The on-chip filter runs ahead of the sensor's own decimation, so it does
-//!   what software provably cannot. GYRO_LPF_HZ then only has to cover
-//!   416 Hz → 50 Hz. Confirm the register details against ST's datasheet.
-//! TODO: Same question for the accel ODR — pick it against the actual read rate
-//!   rather than carrying over the C++ value.
-//!
-//! Driver strategy: use the `lsm6dsox` crate behind the `sensors` Cargo
-//! feature. If its API turns out to be too sync-flavored, fall back to a
-//! 200-line register-level driver — the LSM6DSOX register map is well-
-//! documented in ST's datasheet and we only need a handful of writes.
-//! TODO: Rotate the result to the correct orientation, since it sits in an orientation
-//!  where -y is what we want Z to be.
+//! LSM6DSOX is the low-G accelerometer (up to 16 g) and gyroscope.
+
 use crate::config::{G, LAUNCH_ACCEL_THRESHOLD_G, LSM_ACCEL_BIAS, LSM_GYRO_BIAS};
 use crate::sensors::{transform_sensor_axes, AccelerometerReading, GyroscopeReading, Sensor, SensorError, TemperatureReading, TimedSample, health, SensorResult};
 use crate::utils::math::{AngularVec3, Vec3};
@@ -184,7 +160,7 @@ impl<I2C: I2c> Sensor for Lsm<I2C> {
         })
     }
 
-    async fn sensor_loop(&mut self) {
+    async fn sensor_loop(&mut self) -> ! {
         const MAX_DRDY_GAP: Duration = Duration::from_millis(20);
 
         // TODO: Add a validity flag so the control loop disarms itself
@@ -193,6 +169,7 @@ impl<I2C: I2c> Sensor for Lsm<I2C> {
             let test = match data {
                 SensorResult::Ok(sample) => {
                     // TODO: Use a ring buffer instead
+                    // LSM sends launch detection because it has fewer fluctuations than ADXL
                     if sample.value.accel.mag() / G > LAUNCH_ACCEL_THRESHOLD_G {
                         LAUNCH_DETECTED.signal(true)
                     }
@@ -220,6 +197,7 @@ impl<I2C: I2c> Lsm<I2C> {
         driver.set_accel_sample_rate(DataRate::Freq416Hz).init_err()?; // TODO: tune based on loop speed
         driver.set_accel_scale(AccelerometerScale::Accel16g).init_err()?;
         driver.enable_interrupts(true).init_err()?;
+        // TODO: enable low-pass filter
         driver.map_interrupt(InterruptSource::EmbeddedFunctions, InterruptLine::INT1, true).init_err()?;
         if let Ok(reading) = driver.accel_norm() {
             info!("Acceleration: {:?}", Debug2Format(&reading));

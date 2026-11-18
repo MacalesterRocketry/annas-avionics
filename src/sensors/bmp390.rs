@@ -1,3 +1,5 @@
+//! BMP390 pressure, temperature, and altitude sensor
+
 use bmp390::{Bmp390, ConfigurationBuilder};
 use bmp390::interfaces::{I2cInterface, Polling};
 use bmp390::registers::*;
@@ -48,6 +50,10 @@ impl<I2C: I2c> Sensor for Bmp<I2C> {
     type Reading = BmpReading;
     type Error = Error;
 
+    async fn wait_for_interrupt(&mut self) -> Result<(), Self::Error> where Self: Sized {
+        todo!()
+    }
+
     fn read(&mut self) -> Result<TimedSample<Self::Reading>, Self::Error> {
         let measurement = self.driver.measure().map_err(|_| Error::Read)?; // TODO: handle error better
         // TODO: wait for interrupt
@@ -62,11 +68,7 @@ impl<I2C: I2c> Sensor for Bmp<I2C> {
         })
     }
 
-    async fn wait_for_interrupt(&mut self) -> Result<(), Self::Error> where Self: Sized {
-        todo!()
-    }
-
-    async fn sensor_loop(&mut self) {
+    async fn sensor_loop(&mut self) -> ! {
         todo!()
     }
 }

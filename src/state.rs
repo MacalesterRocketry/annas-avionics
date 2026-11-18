@@ -26,11 +26,10 @@ use serde::{Deserialize, Serialize};
 pub(crate) use crate::control::{disarm_control, set_control_setpoint, ControlSetpoint, arm_control};
 use crate::sensors::lsm6dsox::LAUNCH_DETECTED;
 
-pub struct SystemState<'a, I2C: embedded_hal::i2c::I2c> {
+pub struct SystemState<'a> {
     pub state: Receiver<'a, CriticalSectionRawMutex, FlightState, 3>,
     pub ahrs: Receiver<'a, CriticalSectionRawMutex, AhrsState, 2>,
     pub gps: Receiver<'a, CriticalSectionRawMutex, GpsState, 3>,
-    pub sensors: Sensors<I2C>,
     pub(crate) ignition_time: Option<Instant>,
     pub(crate) launch_orientation: Quat,
     pub(crate) last_tick: Instant,
@@ -76,8 +75,14 @@ fn standard_beep_cycle<'a>(count: u32, cycle_secs: u64) -> BeepCycle<'a> {
     }
 }
 
+impl Default for FlightState {
+    fn default() -> Self {
+        FlightState::PreLaunch(GroundSubState::Startup)
+    }
+}
+
 impl FlightState {
-    /// Returns the appropriate state indicator for the current flight state.
+    /// Returns instructions for the LED and buzzer to indicate the current state.
     pub fn indicator(&self) -> StateIndicator {
         // TODO: should probably add GPS lock check here
         match &self {
@@ -141,9 +146,9 @@ impl SubsystemError for StateError {
     }
 }
 
-impl<'a, I2C: embedded_hal::i2c::I2c> SystemState<'a, I2C> {
-    pub fn new(sensors: Sensors<I2C>) -> Result<Self, StateError> {
-        FLIGHT_STATE.sender().send(FlightState::PreLaunch(GroundSubState::Startup));
+impl<'a> SystemState<'a> {
+    pub fn new() -> Result<Self, StateError> {
+        FLIGHT_STATE.sender().send(FlightState::default());
         let Some(state) = FLIGHT_STATE.receiver() else {
             return Err(StateError::NoFlightStateReceiver);
         };
@@ -157,15 +162,14 @@ impl<'a, I2C: embedded_hal::i2c::I2c> SystemState<'a, I2C> {
             state,
             gps,
             ahrs,
-            sensors,
             ignition_time: None,
             launch_orientation: Quat::IDENTITY,
             last_tick: Instant::now(),
         })
     }
 
-    /// The main loop tick
-    pub async fn tick(&mut self) {
+    /// Core state machine handler
+    pub async fn handle_state(&mut self) {
         let now = Instant::now();
         let tick_time = now - self.last_tick;
         self.last_tick = now;
@@ -173,10 +177,10 @@ impl<'a, I2C: embedded_hal::i2c::I2c> SystemState<'a, I2C> {
         let state = self.state.try_get();
         if state.is_none() {
             error!("Flight state not set; defaulting to PreLaunch(Startup)");
-            self.transition_to(FlightState::PreLaunch(GroundSubState::Startup));
+            self.transition_to(FlightState::default());
         }
 
-        match state.unwrap_or(FlightState::PreLaunch(GroundSubState::Startup)) {
+        match state.unwrap_or_default() {
             // Everything that occurs on the ground prior to launch.
             FlightState::PreLaunch(sub) => {
                 set_control_setpoint(ControlSetpoint::Neutral);
@@ -314,27 +318,13 @@ pub fn roll_program(time_since_ignition: Duration) -> Deg {
     }
 }
 
-pub async fn system_loop(i2c_config: I2cConfig, peripheral_config: PeripheralConfig, interrupt_config: InterruptConfig) {
-    info!("initializing I²C bus");
-    let mut config = i2c::Config::default();
-    config.frequency = 400_000;
-    let i2c = i2c::I2c::new_blocking(i2c_config.bus, i2c_config.scl, i2c_config.sda, config);
-    info!("I²C bus initialized");
-
+pub async fn state_machine_loop(peripheral_config: PeripheralConfig) {
     info!("initializing GPIO");
     let mut eject_button = Input::new(peripheral_config.eject_button, embassy_rp::gpio::Pull::Up);
     info!("GPIO initialized");
 
-    info!("initializing sensors");
-    // `init_all` handles sensor errors itself, and some missing sensors are
-    // tolerable, so we don't need any error handling on this. Each sensor
-    // consumer handles missing data instead.
-    let i2c_mutex = I2C_BUS_CELL.init(Mutex::new(RefCell::new(i2c)));
-    let sensors = sensors::init_all(interrupt_config, i2c_mutex);
-    info!("sensors initialized");
-
     info!("initializing system state");
-    let mut system = match SystemState::new(sensors) {
+    let mut system = match SystemState::new() {
         Ok(system) => {
             mark_init_complete(Subsystem::BASE_SYSTEM);
             system
@@ -361,6 +351,6 @@ pub async fn system_loop(i2c_config: I2cConfig, peripheral_config: PeripheralCon
         //  integrated with sensors and AHRS. It can just read the AHRS data at any given moment.
         //  I'm not totally sure where the state machine should go, but I guess the sensor loop makes sense.
         //  Actually, it might be a problem to keep AHRS data atomic. I don't know.
-        system.tick().await;
+        system.handle_state().await;
     }
 }

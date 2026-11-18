@@ -80,7 +80,7 @@ pub async fn indicator_loop(
 
     // Every 20Hz, check the state and proceed with the according buzzer pattern.
     let mut ticker = Ticker::every(Duration::from_hz(20));
-    let mut current_state = state_receiver.try_get().unwrap_or(FlightState::PreLaunch(GroundSubState::Startup));
+    let mut current_state = state_receiver.try_get().unwrap_or_default();
     let mut entered_at = Instant::now();
 
     let flash_duration = Duration::from_millis(250);

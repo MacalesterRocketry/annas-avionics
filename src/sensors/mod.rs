@@ -11,18 +11,24 @@ pub mod health;
 pub mod lsm6dsox;
 
 use crate::config::G;
-use crate::config::board::InterruptConfig;
+use crate::config::board::{I2cConfig, InterruptConfig, PeripheralConfig};
 use crate::sensors::health::{FaultDebouncer, SensorFault};
 use crate::utils::errors::{Subsystem, SubsystemError, mark_init_complete, report_init_error};
 use crate::utils::math::{AngularVec3, Vec3};
 use core::cell::RefCell;
+use core::future::pending;
+use defmt::info;
 use embassy_embedded_hal::shared_bus::blocking::i2c::I2cDevice;
 use embassy_futures::select::{select, Either};
 use embassy_rp::gpio::{Input, Pull};
+use embassy_rp::i2c;
+use embassy_rp::i2c::Blocking;
+use embassy_rp::peripherals::I2C0;
 use embassy_sync::blocking_mutex::Mutex;
-use embassy_sync::blocking_mutex::raw::RawMutex;
+use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_time::{Duration, Instant, Timer};
 use embedded_hal::i2c::I2c;
+use crate::{sensors, I2C_BUS_CELL};
 
 #[derive(Clone, Copy)]
 pub struct TimedSample<T> {
@@ -167,7 +173,39 @@ pub trait Sensor {
             }
         }
     }
-    async fn sensor_loop(&mut self);
+    async fn sensor_loop(&mut self) -> !;
+}
+
+async fn run_sensor<S: Sensor>(sensor: Option<S>) -> ! {
+    match sensor {
+        None => pending().await,
+        Some(mut sensor) => sensor.sensor_loop().await,
+    }
+}
+
+// TODO: Rearrange this file and split things up between files; this is the most important function.
+pub async fn sensor_loops(i2c_config: I2cConfig, interrupt_config: InterruptConfig) -> ! {
+    info!("initializing I²C bus");
+    let mut config = i2c::Config::default();
+    config.frequency = 400_000;
+    let i2c = i2c::I2c::new_blocking(i2c_config.bus, i2c_config.scl, i2c_config.sda, config);
+    info!("I²C bus initialized");
+
+    info!("initializing sensors");
+    // `init_all` handles sensor errors itself, and some missing sensors are
+    // tolerable, so we don't need any error handling on this. Each sensor
+    // consumer handles missing data instead.
+    let i2c_mutex = I2C_BUS_CELL.init(Mutex::new(RefCell::new(i2c)));
+    let sensors = init_all(interrupt_config, i2c_mutex);
+    info!("sensors initialized");
+
+    // This weird pattern matching is to prevent Rust from trying to interpret it as (!, !, !) for some reason.
+    let (never, _, _) = embassy_futures::join::join3(
+        run_sensor(sensors.adxl),
+        run_sensor(sensors.lsm),
+        run_sensor(sensors.bmp),
+    ).await;
+    never
 }
 
 pub trait AccelerometerReading {
