@@ -7,19 +7,17 @@
 
 use crate::FLIGHT_STATE;
 use crate::config::{AHRS_ACC_BETA, AHRS_MAG_BETA, G, GYRO_LPF_HZ, LAUNCH_ACCEL_THRESHOLD_G};
-use crate::sensors::health::SensorFault;
-use crate::sensors::lsm6dsox::{Error, LsmError};
-use crate::sensors::{Sensor, SensorError, health};
+use crate::sensors::lsm6dsox::LSM_LATEST;
+use crate::sensors::Sensor;
 use crate::utils::duration_to_seconds;
 use crate::utils::errors::{Subsystem, SubsystemError, report_init_error};
 use crate::utils::math::{AngularVec3, Grad4, Quat, Vec3, axis_angle_rad_to_quat};
 use crate::utils::{deserialize_instant, serialize_instant};
 use core::cmp::PartialEq;
 use core::f64::consts::PI;
-use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::watch::Watch;
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Instant};
 use embedded_hal::i2c::I2c;
 use libm::sqrt;
 use serde::{Deserialize, Serialize};
@@ -352,10 +350,11 @@ impl SubsystemError for AhrsError {
     }
 }
 
-pub async fn ahrs_loop<I2C: I2c>(mut lsm: crate::sensors::lsm6dsox::Lsm<I2C>) -> ! { // TODO: shouldn't take any arguments, I don't think
-    const MAX_DRDY_GAP: Duration = Duration::from_millis(20);
+pub async fn ahrs_loop<I2C: I2c>() -> ! {
     let mut ahrs = AhrsState::default();
     AHRS_STATE.sender().send(ahrs);
+
+    let mut lsm_recv = LSM_LATEST.receiver().unwrap();
 
     let Some(mut flight_state_rx) = FLIGHT_STATE.receiver() else {
         report_init_error(AhrsError::NoFlightStateReceiver);
@@ -364,38 +363,12 @@ pub async fn ahrs_loop<I2C: I2c>(mut lsm: crate::sensors::lsm6dsox::Lsm<I2C>) ->
 
     // TODO: Add a validity flag so the control loop disarms itself
     loop {
-        let data = match select(
-            lsm.wait_for_interrupt(), // TODO: this all needs to change to use a receiver from the Watch in the LSM
-            Timer::after(MAX_DRDY_GAP),
-        ).await {
-            Either::First(Ok(())) => {  // interrupt: new data
-                let flight_state = flight_state_rx.try_get().unwrap_or_default();
-                ahrs.set_mode(flight_state.ahrs_mode());
+        let data = lsm_recv.changed().await;
+        let flight_state = flight_state_rx.try_get().unwrap_or_default();
+        ahrs.set_mode(flight_state.ahrs_mode());
 
-                // Read/drain FIFO, publish AHRS, mark healthy.
-                let data = lsm.read();
-                match data {
-                    Ok(sample) => {
-                        ahrs.update(sample.value.gyro, Some(sample.value.accel), None, sample.sampled_at);
-                        AHRS_STATE.sender().send(ahrs);
-                        data
-                    }
-                    Err(e) => {
-                        report_init_error(SensorError::Lsm(e));
-                        health::mark_faulted(SensorFault::LSM);
-                        Err(Error::Read(LsmError::NoDataReady))
-                    }
-                }
-            }
-            Either::Second(()) => { // timeout
-                // Mark interrupt/sample path stale; probe sensor status/recover.
-                // TODO: mark stale
-                lsm.read()
-            }
-            Either::First(Err(_)) => {
-                // Treat as an input-path failure.
-                Err(Error::Read(LsmError::NoDataReady))
-            }
-        };
+        // Read/drain FIFO, publish AHRS, mark healthy.
+        ahrs.update(data.value.gyro, Some(data.value.accel), None, data.sampled_at);
+        AHRS_STATE.sender().send(ahrs);
     }
 }

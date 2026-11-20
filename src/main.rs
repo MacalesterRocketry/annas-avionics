@@ -117,11 +117,11 @@ async fn core0_main(
 ) {
     info!("core 0: avionics task starting");
 
-    embassy_futures::join::join3(
+    embassy_futures::join::join4(
         state_machine_loop(peripheral_config),
         control_loop(servos_config),
         sensor_loops(i2c_config, interrupt_config),
-        // ahrs_loop(),
+        ahrs_loop(),
     ).await;
 }
 

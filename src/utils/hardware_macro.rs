@@ -3,6 +3,7 @@
 /// think that's super necessary for now because it seems to work and most likely won't cause any
 /// runtime issues.
 /// TODO: Figure out this code and refactor
+/// TODO: Add fully-qualified static type aliases so we can use them in places like the panic handler
 #[macro_export] macro_rules! define_hardware {
     (
         $main_struct:ident {
