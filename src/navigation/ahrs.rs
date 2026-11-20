@@ -8,7 +8,7 @@
 use crate::FLIGHT_STATE;
 use crate::config::{AHRS_ACC_BETA, AHRS_MAG_BETA, G, GYRO_LPF_HZ, LAUNCH_ACCEL_THRESHOLD_G};
 use crate::sensors::lsm6dsox::LSM_LATEST;
-use crate::sensors::Sensor;
+use crate::sensors::{AccelerometerReading, Sensor};
 use crate::utils::duration_to_seconds;
 use crate::utils::errors::{Subsystem, SubsystemError, report_init_error};
 use crate::utils::math::{AngularVec3, Grad4, Quat, Vec3, axis_angle_rad_to_quat};
@@ -21,6 +21,7 @@ use embassy_time::{Duration, Instant};
 use embedded_hal::i2c::I2c;
 use libm::sqrt;
 use serde::{Deserialize, Serialize};
+use crate::sensors::adxl375::ADXL_LATEST;
 
 /// Latest AHRS solution, published once per sensor sample.
 pub static AHRS_STATE: Watch<CriticalSectionRawMutex, AhrsState, 2> = Watch::new();
@@ -354,7 +355,8 @@ pub async fn ahrs_loop<I2C: I2c>() -> ! {
     let mut ahrs = AhrsState::default();
     AHRS_STATE.sender().send(ahrs);
 
-    let mut lsm_recv = LSM_LATEST.receiver().unwrap();
+    let mut lsm_recv = LSM_LATEST.receiver().unwrap(); // TODO: fix these unwraps
+    let mut adxl_recv = ADXL_LATEST.receiver().unwrap();
 
     let Some(mut flight_state_rx) = FLIGHT_STATE.receiver() else {
         report_init_error(AhrsError::NoFlightStateReceiver);
@@ -367,8 +369,17 @@ pub async fn ahrs_loop<I2C: I2c>() -> ! {
         let flight_state = flight_state_rx.try_get().unwrap_or_default();
         ahrs.set_mode(flight_state.ahrs_mode());
 
+        let gyro = data.value.gyro;
+
+        let mut accel: Option<Vec3> = Some(data.value.accel);
+        if data.value.has_accel_saturated() {
+            accel = adxl_recv.try_get().map(|data| data.value.accel);
+        }
+
+        let mag = None;
+
         // Read/drain FIFO, publish AHRS, mark healthy.
-        ahrs.update(data.value.gyro, Some(data.value.accel), None, data.sampled_at);
+        ahrs.update(gyro, accel, mag, data.sampled_at);
         AHRS_STATE.sender().send(ahrs);
     }
 }
