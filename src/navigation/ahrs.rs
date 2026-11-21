@@ -7,8 +7,9 @@
 
 use crate::FLIGHT_STATE;
 use crate::config::{AHRS_ACC_BETA, AHRS_MAG_BETA, G, GYRO_LPF_HZ, LAUNCH_ACCEL_THRESHOLD_G};
-use crate::sensors::lsm6dsox::LSM_LATEST;
-use crate::sensors::{AccelerometerReading, Sensor};
+use crate::sensors::adxl375::{ADXL_LATEST, AdxlReading};
+use crate::sensors::lsm6dsox::{LSM_LATEST, LsmReading};
+use crate::sensors::{AccelerometerReading, Sensor, TimedSample};
 use crate::utils::duration_to_seconds;
 use crate::utils::errors::{Subsystem, SubsystemError, report_init_error};
 use crate::utils::math::{AngularVec3, Grad4, Quat, Vec3, axis_angle_rad_to_quat};
@@ -18,10 +19,8 @@ use core::f64::consts::PI;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::watch::Watch;
 use embassy_time::{Duration, Instant};
-use embedded_hal::i2c::I2c;
 use libm::sqrt;
 use serde::{Deserialize, Serialize};
-use crate::sensors::adxl375::ADXL_LATEST;
 
 /// Latest AHRS solution, published once per sensor sample.
 pub static AHRS_STATE: Watch<CriticalSectionRawMutex, AhrsState, 2> = Watch::new();
@@ -351,7 +350,20 @@ impl SubsystemError for AhrsError {
     }
 }
 
-pub async fn ahrs_loop<I2C: I2c>() -> ! {
+fn merge_accel(lsm: Option<TimedSample<LsmReading>>, adxl: Option<TimedSample<AdxlReading>>) -> Option<Vec3> {
+    if lsm.is_none() && adxl.is_none() {
+        return None;
+    }
+
+    let is_lsm_saturated = lsm.map(|data| data.value.is_accel_saturated()).unwrap_or(false);
+    if is_lsm_saturated {
+        adxl.map(|data| data.value.accel)
+    } else {
+        lsm.map(|data| data.value.accel)
+    }
+}
+
+pub async fn ahrs_loop() -> ! {
     let mut ahrs = AhrsState::default();
     AHRS_STATE.sender().send(ahrs);
 
@@ -365,21 +377,16 @@ pub async fn ahrs_loop<I2C: I2c>() -> ! {
 
     // TODO: Add a validity flag so the control loop disarms itself
     loop {
-        let data = lsm_recv.changed().await;
+        let lsm_sample = lsm_recv.changed().await;
         let flight_state = flight_state_rx.try_get().unwrap_or_default();
         ahrs.set_mode(flight_state.ahrs_mode());
 
-        let gyro = data.value.gyro;
-
-        let mut accel: Option<Vec3> = Some(data.value.accel);
-        if data.value.has_accel_saturated() {
-            accel = adxl_recv.try_get().map(|data| data.value.accel);
-        }
-
+        let gyro = lsm_sample.value.gyro;
+        let accel = merge_accel(Some(lsm_sample), adxl_recv.try_get());
         let mag = None;
 
         // Read/drain FIFO, publish AHRS, mark healthy.
-        ahrs.update(gyro, accel, mag, data.sampled_at);
+        ahrs.update(gyro, accel, mag, lsm_sample.sampled_at);
         AHRS_STATE.sender().send(ahrs);
     }
 }

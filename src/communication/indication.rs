@@ -1,6 +1,6 @@
 use crate::config::board::{IndicatorsConfig, NUM_LEDS, Neopixel};
-use crate::state::{FlightState, GroundSubState};
-use crate::utils::errors::{has_any_error, mark_init_complete, report_init_error, Subsystem, SubsystemError};
+use crate::state::FlightState;
+use crate::utils::errors::{Subsystem, SubsystemError, has_any_error, mark_init_complete, report_init_error};
 use crate::{FLIGHT_STATE, Irqs};
 use defmt::*;
 use defmt_rtt as _;
@@ -127,7 +127,7 @@ pub async fn indicator_loop(
     }
 }
 
-fn init_indicators(indicators_config: IndicatorsConfig) -> Result<(Output<'static>, Neopixel, Receiver<'static, CriticalSectionRawMutex, FlightState, 3>), IndicationError> {
+fn init_indicators(indicators_config: IndicatorsConfig) -> Result<(Output<'static>, Neopixel, Receiver<'static, CriticalSectionRawMutex, FlightState, 5>), IndicationError> {
     info!("initializing buzzer");
     let mut buzzer = Output::new(indicators_config.buzzer, embassy_rp::gpio::Level::Low);
     buzzer.set_low();

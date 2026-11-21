@@ -11,7 +11,7 @@ pub mod health;
 pub mod lsm6dsox;
 
 use crate::config::G;
-use crate::config::board::{I2cConfig, InterruptConfig, PeripheralConfig};
+use crate::config::board::{I2cConfig, InterruptConfig};
 use crate::sensors::health::{FaultDebouncer, SensorFault};
 use crate::utils::errors::{Subsystem, SubsystemError, mark_init_complete, report_init_error};
 use crate::utils::math::{AngularVec3, Vec3};
@@ -22,13 +22,11 @@ use embassy_embedded_hal::shared_bus::blocking::i2c::I2cDevice;
 use embassy_futures::select::{select, Either};
 use embassy_rp::gpio::{Input, Pull};
 use embassy_rp::i2c;
-use embassy_rp::i2c::Blocking;
-use embassy_rp::peripherals::I2C0;
 use embassy_sync::blocking_mutex::Mutex;
-use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
+use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_hal::i2c::I2c;
-use crate::{sensors, I2C_BUS_CELL};
+use crate::I2C_BUS_CELL;
 
 #[derive(Clone, Copy)]
 pub struct TimedSample<T> {
@@ -212,7 +210,7 @@ pub trait AccelerometerReading {
     fn saturation_threshold_g(&self) -> f64;
     /// Return the body-frame linear acceleration (m/s²), bias-subtracted.
     fn accel(&self) -> Vec3;
-    fn has_accel_saturated(&self) -> bool {
+    fn is_accel_saturated(&self) -> bool {
         self.accel().mag() >= (self.saturation_threshold_g() * 0.99 * G)
     }
 }

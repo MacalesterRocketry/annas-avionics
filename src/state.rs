@@ -1,24 +1,18 @@
-//! State machine, ported from `states.cpp`. Skeleton.
-//!
-//! In the C++ version this was a single `handleState()` switch called from
-//! `loop()`. Here we split it into an Embassy task that wakes on each sensor
-//! sample (driven by `embassy_time::Ticker`) plus an indicator subtask that
-//! drives the NeoPixel + buzzer. See PORTING_PLAN.md "state machine" section.
+//! Central state machine. This keeps track of the overall state of the system, e.g. if it's
+//! on the ground or in flight and if it's in the burn, coast, drogue descent, etc. phase of the
+//! flight. If a system needs to know the state of the flight, it should either depend on this
+//! or be controlled by this.
 
 use crate::communication::indication::{BeepCycle, LedColor, StateIndicator};
 use crate::config::HAS_DROGUE_CHUTE;
-use crate::config::board::{I2cConfig, InterruptConfig, PeripheralConfig};
+use crate::config::board::PeripheralConfig;
 use crate::navigation::ahrs::{AhrsMode, AhrsState, AHRS_STATE};
 use crate::navigation::gps::{GPS_STATE, GpsState};
-use crate::sensors::Sensors;
 use crate::utils::errors::{Subsystem, SubsystemError, is_init_settled, mark_init_complete, report_init_error};
 use crate::utils::math::{Deg, Quat, roll_deg_to_quat};
-use crate::{FLIGHT_STATE, I2C_BUS_CELL, sensors};
-use core::cell::RefCell;
+use crate::FLIGHT_STATE;
 use defmt::{error, info};
 use embassy_rp::gpio::Input;
-use embassy_rp::i2c;
-use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::watch::Receiver;
 use embassy_time::{Duration, Instant, Ticker};
@@ -27,9 +21,9 @@ pub(crate) use crate::control::{disarm_control, set_control_setpoint, ControlSet
 use crate::sensors::lsm6dsox::LAUNCH_DETECTED;
 
 pub struct SystemState<'a> {
-    pub state: Receiver<'a, CriticalSectionRawMutex, FlightState, 3>,
-    pub ahrs: Receiver<'a, CriticalSectionRawMutex, AhrsState, 2>,
-    pub gps: Receiver<'a, CriticalSectionRawMutex, GpsState, 3>,
+    pub state: FlightState,
+    pub ahrs: Option<Receiver<'a, CriticalSectionRawMutex, AhrsState, 2>>,
+    pub gps: Option<Receiver<'a, CriticalSectionRawMutex, GpsState, 3>>,
     pub(crate) ignition_time: Option<Instant>,
     pub(crate) launch_orientation: Quat,
     pub(crate) last_tick: Instant,
@@ -129,58 +123,28 @@ impl FlightState {
     }
 }
 
-/// Everything that can go wrong bringing up the core system state.
-#[derive(Debug, defmt::Format)]
-pub enum StateError {
-    /// Too many `FLIGHT_STATE` receivers are in use, so another can't be created.
-    NoFlightStateReceiver,
-    /// Too many `GPS_STATE` receivers are in use, so another can't be created.
-    NoGpsReceiver,
-    /// Too many `AHRS_STATE` receivers are in use, so another can't be created.
-    NoAhrsReceiver,
-}
-
-impl SubsystemError for StateError {
-    fn subsystem(&self) -> Subsystem {
-        Subsystem::BASE_SYSTEM
-    }
-}
-
 impl<'a> SystemState<'a> {
-    pub fn new() -> Result<Self, StateError> {
-        FLIGHT_STATE.sender().send(FlightState::default());
-        let Some(state) = FLIGHT_STATE.receiver() else {
-            return Err(StateError::NoFlightStateReceiver);
-        };
-        let Some(gps) = GPS_STATE.receiver() else {
-            return Err(StateError::NoGpsReceiver);
-        };
-        let Some(ahrs) = AHRS_STATE.receiver() else {
-            return Err(StateError::NoAhrsReceiver);
-        };
-        Ok(Self {
+    pub fn new() -> Self {
+        let mut state = FlightState::default();
+        FLIGHT_STATE.sender().send(state); // set the state machine to PreLaunch(Startup)
+
+        Self {
             state,
-            gps,
-            ahrs,
+            gps: GPS_STATE.receiver(),
+            ahrs: AHRS_STATE.receiver(),
             ignition_time: None,
             launch_orientation: Quat::IDENTITY,
             last_tick: Instant::now(),
-        })
+        }
     }
 
-    /// Core state machine handler
+    /// The actual core state machine; this is called each tick and handles the state transitions and actions.
     pub async fn handle_state(&mut self) {
         let now = Instant::now();
         let tick_time = now - self.last_tick;
         self.last_tick = now;
 
-        let state = self.state.try_get();
-        if state.is_none() {
-            error!("Flight state not set; defaulting to PreLaunch(Startup)");
-            self.transition_to(FlightState::default());
-        }
-
-        match state.unwrap_or_default() {
+        match self.state {
             // Everything that occurs on the ground prior to launch.
             FlightState::PreLaunch(sub) => {
                 set_control_setpoint(ControlSetpoint::Neutral);
@@ -194,9 +158,9 @@ impl<'a> SystemState<'a> {
                     if LAUNCH_DETECTED.signaled() {
                         self.transition_to(FlightState::Ascent(AscentSubState::Burn));
                     }
-                    let has_fix = match self.gps.try_get() {
-                        Some(gps) => gps.has_fix,
-                        None => false,
+                    let has_fix = match self.gps.as_mut().map(|mut gps_recv| gps_recv.try_get()) {
+                        Some(Some(gps)) => gps.has_fix,
+                        _ => false,
                     };
                     match gps_state {
                         ReadyToLaunchSubState::WaitingForGPS => {
@@ -221,7 +185,10 @@ impl<'a> SystemState<'a> {
                 set_control_setpoint(ControlSetpoint::Attitude(
                     attitude_target(self.launch_orientation, roll_program(time_since_ignition)),
                 ));
-                let ahrs_opt = self.ahrs.try_get();
+                let ahrs_opt = match self.ahrs.as_mut().map(|mut ahrs| ahrs.try_get()) {
+                    Some(Some(ahrs)) => Some(ahrs),
+                    _ => None,
+                };
                 match sub {
                     AscentSubState::Burn => {
                         // TODO: test;
@@ -270,17 +237,18 @@ impl<'a> SystemState<'a> {
             _ => {}
         }
 
+        self.state = next_state;
         FLIGHT_STATE.sender().send(next_state);
     }
 
     fn handle_ignition(&mut self) {
-        match self.ahrs.try_get() {
-            Some(ahrs) => {
+        match self.ahrs.as_mut().map(|mut ahrs| ahrs.try_get()) {
+            Some(Some(ahrs)) => {
                 arm_control();
                 self.launch_orientation = ahrs.get_orientation_earth();
                 self.ignition_time = Some(Instant::now());
             }
-            None => {
+            _ => {
                 error!("ignition detected but no AHRS solution available; disabling fins");
                 disarm_control();
             }
@@ -299,14 +267,7 @@ fn attitude_target(launch_orientation: Quat, target_roll: Deg) -> Quat {
     (launch_orientation * qroll).normalized()
 }
 
-/// Pre-programmed roll command: returns target roll angle (deg) as a function
-/// of time since ignition. Currently just a stub matching `rollProgram()` in
-/// states.cpp.
-///
-/// NOTE: this angle is in the same convention as `calculate_roll_deg`, which
-/// flight data showed to be earth-frame — it tracked integrated gyro closely
-/// through most of the flight but diverged sharply once the rocket tilted at
-/// apogee.
+/// Pre-programmed roll command: returns target roll angle (deg) as a function of time since ignition.
 pub fn roll_program(time_since_ignition: Duration) -> Deg {
     let time_s = time_since_ignition.as_micros() as f64 * 1e-6;
     if (0.0..3.0).contains(&time_s) {
@@ -318,39 +279,15 @@ pub fn roll_program(time_since_ignition: Duration) -> Deg {
     }
 }
 
-pub async fn state_machine_loop(peripheral_config: PeripheralConfig) {
-    info!("initializing GPIO");
-    let mut eject_button = Input::new(peripheral_config.eject_button, embassy_rp::gpio::Pull::Up);
-    info!("GPIO initialized");
-
+pub async fn state_machine_loop() {
     info!("initializing system state");
-    let mut system = match SystemState::new() {
-        Ok(system) => {
-            mark_init_complete(Subsystem::BASE_SYSTEM);
-            system
-        }
-        Err(e) => {
-            report_init_error(e);
-            defmt::panic!("Failed to initialize system state");
-        }
-    };
-    // TODO: handle errors with Neopixel notifs and logging and stuff instead of panicking
+    let mut system = SystemState::new();
+    mark_init_complete(Subsystem::BASE_SYSTEM);
     info!("system state initialized");
 
-    // TODO: init servos and PID
-    let mut ticker = Ticker::every(Duration::from_hz(250));
+    let mut ticker = Ticker::every(Duration::from_hz(100));
     loop {
         ticker.next().await;
-        // TODO: I'm wondering if the whole systemState thing should be split out into like 4-ish loops:
-        //  state handling, sensors, AHRS, and PID/servos. I guess state handling would combine all the data?
-        //  Or maybe just extract PID/servos? But tick() should definitely be more tightly integrated
-        //  with the loop and ticker.
-        //  What I'm thinking now: Sensors and AHRS definitely need to be together (but I need to
-        //  figure out how to handle slower sensors). PID and servos can be slower; it's probably
-        //  fine to be something like 50Hz instead of 400Hz, and it doesn't need to be tightly
-        //  integrated with sensors and AHRS. It can just read the AHRS data at any given moment.
-        //  I'm not totally sure where the state machine should go, but I guess the sensor loop makes sense.
-        //  Actually, it might be a problem to keep AHRS data atomic. I don't know.
         system.handle_state().await;
     }
 }

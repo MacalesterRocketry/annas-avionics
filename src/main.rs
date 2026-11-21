@@ -1,11 +1,5 @@
-//! Entry point + multicore executor setup.
-//!
-//! Core split (mirrors the porting plan):
-//!   • Core 0 — sensor sampling, AHRS, state machine, roll PID, servo PWM.
-//!     This is the hot loop; every µs matters.
-//!   • Core 1 — SD card writes, GPS UART parsing, NeoPixel + buzzer.
-//!     These can tolerate latency spikes; isolating them on a separate core
-//!     keeps a 30 ms `sd.flush()` from stalling the control loop.
+//! See README.md for most of the details. This file initializes both cores and runs a set of
+//! async loops on each core, using the Embassy framework.
 
 #![no_std]
 #![no_main]
@@ -13,12 +7,13 @@
 extern crate uom;
 
 use core::cell::RefCell;
+use core::future::pending;
 use crate::communication::sdcard::sd_logging_loop;
 use crate::config::board::{GpsConfig, I2cConfig, IndicatorsConfig, InterruptConfig, PeripheralConfig, SdConfig};
 use crate::config::board::ServoConfig;
 use crate::control::control_loop;
 use crate::navigation::gps::gps_loop;
-use crate::state::{FlightState, state_machine_loop};
+use crate::state::{state_machine_loop, FlightState, SystemState};
 use communication::indication::indicator_loop;
 use defmt::*;
 use defmt_rtt as _;
@@ -27,6 +22,7 @@ use embassy_rp::multicore::{Stack, spawn_core1};
 use embassy_rp::peripherals::{DMA_CH0, I2C0, PIO0, UART0};
 use embassy_rp::{bind_interrupts, dma, pio};
 use embassy_rp::{i2c, uart};
+use embassy_rp::gpio::Input;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
 use embassy_sync::watch::Watch;
@@ -60,36 +56,33 @@ bind_interrupts!(struct Irqs {
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
 
-pub static FLIGHT_STATE: Watch<CriticalSectionRawMutex, FlightState, 3> = Watch::new();
+pub static FLIGHT_STATE: Watch<CriticalSectionRawMutex, FlightState, 5> = Watch::new();
 
 // TODO: Move this I2C0 out into a type variable
 pub static I2C_BUS_CELL: StaticCell<Mutex<NoopRawMutex, RefCell<i2c::I2c<I2C0, i2c::Blocking>>>> = StaticCell::new();
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) -> ! {
-    FLIGHT_STATE
-        .sender()
-        .send(FlightState::default());
-
     let p = embassy_rp::init(Default::default());
     let hw = take_hardware!(p);
 
-    // Spawn core 1's executor first so it's ready to receive packets the
-    // moment core 0 starts producing them.
+    // spawn core 0 (the main core with everything fast)
+    spawn_core(
+        EXECUTOR0.init(Executor::new()),
+        core0_main(hw.i2c, hw.interrupts, hw.servos),
+    );
+
+    // spawn core 1 (the secondary core with the slow stuff)
     spawn_core1(
         p.CORE1,
+        // Needs to be unsafe because we're manually defining a chunk of memory to be the stack
         unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
         move || {
             spawn_core(
                 EXECUTOR1.init(Executor::new()),
-                core1_main(hw.sd, hw.gps, hw.indicators),
+                core1_main(hw.sd, hw.gps, hw.indicators, hw.peripherals),
             )
         },
-    );
-
-    spawn_core(
-        EXECUTOR0.init(Executor::new()),
-        core0_main(hw.i2c, hw.interrupts, hw.peripherals, hw.servos),
     );
 }
 
@@ -100,7 +93,7 @@ fn spawn_core(
     executor.run(|spawner| {
         let task = core.unwrap_or_else(|e| {
             error!("core: failed to spawn task: {:?}", e);
-            defmt::panic!("core task spawn failed");
+            defmt::panic!("core task spawn failed"); // If we can't start one of the cores, there's no recovering
         });
 
         spawner.spawn(task);
@@ -112,13 +105,12 @@ fn spawn_core(
 async fn core0_main(
     i2c_config: I2cConfig,
     interrupt_config: InterruptConfig,
-    peripheral_config: PeripheralConfig,
     servos_config: ServoConfig,
 ) {
     info!("core 0: avionics task starting");
 
     embassy_futures::join::join4(
-        state_machine_loop(peripheral_config),
+        state_machine_loop(),
         control_loop(servos_config),
         sensor_loops(i2c_config, interrupt_config),
         ahrs_loop(),
@@ -131,13 +123,25 @@ async fn core1_main(
     sd_config: SdConfig,
     gps_config: GpsConfig,
     indicators_config: IndicatorsConfig,
+    peripheral_config: PeripheralConfig,
 ) {
     info!("core 1: I/O task starting");
 
-    embassy_futures::join::join3(
+    embassy_futures::join::join4(
         indicator_loop(indicators_config),
         sd_logging_loop(sd_config),
         gps_loop(gps_config),
-        // TODO: Add supervisor task for eject button, battery monitoring, SD card full, etc.?
+        supervisor_loop(peripheral_config),
     ).await;
+}
+
+// TODO: Move this function to a separate file after deciding if we actually want it
+async fn supervisor_loop(peripheral_config: PeripheralConfig) -> ! {
+    info!("initializing GPIO");
+    let mut eject_button = Input::new(peripheral_config.eject_button, embassy_rp::gpio::Pull::Up);
+    info!("GPIO initialized");
+
+    // TODO: make a loop here
+    //  Should handle eject button, battery monitoring, SD card full, etc.
+    pending().await
 }

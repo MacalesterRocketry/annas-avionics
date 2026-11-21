@@ -5,17 +5,16 @@ use crate::sensors::{transform_sensor_axes, AccelerometerReading, GyroscopeReadi
 use crate::utils::math::{AngularVec3, Vec3};
 use accelerometer::Accelerometer;
 use defmt::*;
-use embassy_futures::select::{select, Either};
 use embassy_rp::gpio::Input;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_sync::watch::Watch;
-use embassy_time::{Delay, Duration, Instant, Timer};
+use embassy_time::{Delay, Duration, Instant};
 use embedded_hal::i2c::I2c;
 use lsm6dsox::*;
 use serde::{Deserialize, Serialize};
 use crate::sensors::health::SensorFault;
-use crate::utils::errors::{report_init_error, report_runtime_error};
+use crate::utils::errors::report_runtime_error;
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, defmt::Format)]
 pub struct LsmReading {
